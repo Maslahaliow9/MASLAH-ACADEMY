@@ -36,6 +36,38 @@
 //
 // Exactly four body paragraphs.
 //
+// ----------------------------------------------------------------
+// WHAT CHANGED IN THIS VERSION (read this before touching the file)
+// ----------------------------------------------------------------
+//
+// 1. SPEED — normal (non-essay) questions were using the SAME
+//    heavy settings as full essays: thinking_level "high",
+//    max_output_tokens 64000, and 16 retrieved chunks. A
+//    one-mark "name the setting" question does not need any of
+//    that, and "high" thinking + a 64k token budget is the
+//    single biggest source of latency. Normal questions now use
+//    a much lighter, faster config (NORMAL_* constants below);
+//    essays keep a richer config (ESSAY_* constants) since they
+//    genuinely need more room and more evidence.
+//
+// 2. ACCURACY / "IT ONLY ANSWERS LIKE AN ESSAY" — the root cause:
+//    buildSystemPrompt() always included the full ESSAY MODE
+//    section (six required components, four body paragraphs,
+//    word-count targets, etc.) in EVERY call, even for plain
+//    factual or one-mark questions. That section biased the
+//    model toward essay-shaped output regardless of what was
+//    actually asked. The system prompt is now built per mode:
+//    normal questions get a system prompt with explicit
+//    "this is NOT an essay" instructions and none of the essay
+//    scaffolding; only true essay requests get the essay section.
+//
+// 3. Retrieval count is now mode-aware (fewer, more targeted
+//    chunks for normal questions = faster vector search + a
+//    smaller prompt = faster generation), and every question
+//    type (list, one-mark, definition, analysis, discussion,
+//    etc.) is explicitly covered by the normal-mode prompt, not
+//    just essays.
+//
 // ================================================================
 //
 // REQUIRED SUPABASE SECRETS:
@@ -117,13 +149,29 @@ const EMBEDDING_MODEL = "gemini-embedding-001";
 
 const EMBEDDING_DIMENSIONS = 768;
 
-const GEMINI_MAX_OUTPUT_TOKENS = 64000;
-
-const GEMINI_THINKING_LEVEL = "high";
-
 const RETRY_LIMIT = 2;
 
-const RETRIEVAL_COUNT = 16;
+// ----------------------------------------------------------------
+// MODE-AWARE TUNING
+//
+// Normal questions (definitions, one-mark recall, list/identify,
+// character/theme/style analysis, discussion, passage questions,
+// etc.) are the vast majority of traffic and should feel instant.
+// Essays are rarer and genuinely need more evidence, more room to
+// write, and a bit more thinking — but even they don't need
+// "high" thinking or a 64k token ceiling; that was pure latency
+// with no quality benefit, since a KCSE essay tops out at a few
+// hundred words.
+// ----------------------------------------------------------------
+
+const NORMAL_RETRIEVAL_COUNT = 8;
+const ESSAY_RETRIEVAL_COUNT = 14;
+
+const NORMAL_THINKING_LEVEL = "low";
+const ESSAY_THINKING_LEVEL = "medium";
+
+const NORMAL_MAX_OUTPUT_TOKENS = 2048;
+const ESSAY_MAX_OUTPUT_TOKENS = 4096;
 
 
 // ================================================================
@@ -210,6 +258,42 @@ function isEssayRequest(
   return essayPatterns.some(
     (pattern) => pattern.test(q)
   );
+}
+
+
+// ================================================================
+// DETECT MARK ALLOCATION (e.g. "(1 mark)", "(4 marks)")
+// ================================================================
+//
+// Used only to give the model a length hint so a 1-mark question
+// doesn't get a paragraph and a 20-mark question doesn't get one
+// sentence. Purely advisory — never overrides the essay check.
+//
+// ================================================================
+
+function detectMarks(
+  question: string
+): number | null {
+
+  const match = question.match(
+    /\(?\s*(\d{1,2})\s*marks?\s*\)?/i
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  const marks = parseInt(match[1], 10);
+
+  if (
+    Number.isNaN(marks) ||
+    marks <= 0 ||
+    marks > 30
+  ) {
+    return null;
+  }
+
+  return marks;
 }
 
 
@@ -389,7 +473,8 @@ async function embedQuery(
 
 async function retrieveEvidence(
   question: string,
-  bookTitle: string | null
+  bookTitle: string | null,
+  matchCount: number
 ): Promise<any[]> {
 
   const queryEmbedding =
@@ -408,7 +493,7 @@ async function retrieveEvidence(
         bookTitle,
 
       match_count:
-        RETRIEVAL_COUNT,
+        matchCount,
     }
   );
 
@@ -506,10 +591,10 @@ function buildEvidenceBlock(
 
 
 // ================================================================
-// MASTER SYSTEM PROMPT
+// SHARED CORE RULES (used in every system prompt, both modes)
 // ================================================================
 
-function buildSystemPrompt(
+function buildCoreRules(
   bookTitle: string
 ): string {
 
@@ -545,10 +630,6 @@ do not wrap it in symbols.
 If you need a list, write it as a plain numbered list using
 "1.", "2.", "3." followed by a space — nothing else.
 
-If you need section labels (for example in an essay), write
-them as plain capitalised words on their own line, with no
-symbols before or after them.
-
 ============================================================
 ABSOLUTE RULE 1 — THE SUPPLIED EVIDENCE IS THE AUTHORITY
 ============================================================
@@ -560,26 +641,13 @@ You MUST NOT manufacture literary information.
 
 Never invent:
 
-- characters
-- character names
-- character relationships
-- events
-- scenes
-- quotations
-- chapter numbers
-- page numbers
-- settings
-- themes
-- symbols
-- historical facts
-- character roles
-- plot developments
-- authorial intentions
-- literary techniques
-- conversations
-- actions
-- motivations
-- consequences
+- characters, character names, character relationships
+- events, scenes, quotations
+- chapter numbers, page numbers
+- settings, themes, symbols
+- historical facts, character roles, plot developments
+- authorial intentions, literary techniques
+- conversations, actions, motivations, consequences
 
 unless the supplied evidence establishes them.
 
@@ -591,57 +659,51 @@ and briefly, in one sentence, then continue with what the
 evidence does support. That is better than guessing.
 
 ============================================================
-ABSOLUTE RULE 2 — NEVER PAD AN ANSWER, AND NEVER OVER-EXPLAIN
+ABSOLUTE RULE 2 — NEVER PAD, NEVER OVER-EXPLAIN
 ============================================================
 
 Do not add invented material simply because the question
 asks for a particular number of points or characters.
 
-For example:
+If the question asks for 20 characters but the evidence only
+establishes 14, give the 14 you can support, then add one
+short closing sentence noting the limitation — do not write a
+long explanation of your counting method, and do not repeat
+the disclaimer more than once.
 
-If the question asks for 20 characters but the evidence
-only establishes 14 characters, give the 14 you can support,
-then add one short closing sentence noting that the supplied
-material does not establish more than that — do not write a
-long explanation of your counting method, do not use
-asterisks or bold to flag this, and do not repeat the
-disclaimer more than once.
-
-Do not count the same character twice because the character
-has two roles.
-
-Do not count:
-
-- a group as a character
-- a historical person as a fictional character
-- a role as a character
-- an unnamed person as a named character
-- the same character under two descriptions
+Do not count the same character twice because it has two
+roles. Do not count a group, a historical person, a role, or
+an unnamed person as a named character.
 
 ============================================================
-ABSOLUTE RULE 3 — ANSWER THE ACTUAL QUESTION
+ABSOLUTE RULE 3 — ANSWER THE ACTUAL QUESTION, AT THE RIGHT LENGTH
 ============================================================
 
 Before producing the answer, silently determine:
 
 1. What is the command word?
 2. What exactly is being asked?
-3. What literary issue is being tested?
+3. How many marks is this question worth (if stated)?
 4. Which evidence is relevant?
-5. What structure best answers the question?
+5. What structure and length actually fits this question?
 
-Do not answer a different question.
+Match your answer length to what is actually being asked:
 
-Do not turn every question into an essay.
-
-Do not give a character list when the question asks for
-analysis.
-
-Do not give a theme definition when the question asks
-for significance.
-
-Do not give plot summary when the question asks for
-analysis.
+- A 1–2 mark question ("name", "state", "identify") needs a
+  short, direct answer — a sentence or a short list. It does
+  NOT need an introduction, explanation paragraph, or essay
+  structure.
+- A "list/name/identify" question needs a plain numbered list,
+  each item briefly identified — not a discussion.
+- A question asking to "explain", "discuss", "analyse", or
+  "describe" needs real analysis (point, evidence, explanation,
+  significance) but only as long as the question warrants —
+  usually a focused paragraph or a few short paragraphs, not a
+  full essay with introduction/body/conclusion, UNLESS the
+  question explicitly asks for an essay.
+- Do not turn every question into an essay. Do not give a
+  character list when the question asks for analysis. Do not
+  give plot summary when the question asks for analysis.
 
 ============================================================
 KCSE LITERATURE QUALITY
@@ -649,370 +711,197 @@ KCSE LITERATURE QUALITY
 
 Use formal, clear, analytical English.
 
-Strong literary analysis normally follows:
+Where analysis is warranted, follow:
 
-POINT
-→ EVIDENCE
-→ EXPLANATION
-→ SIGNIFICANCE
+POINT → EVIDENCE → EXPLANATION → SIGNIFICANCE
 
 Use analytical expressions naturally, including:
 
-"This reveals..."
-"This suggests..."
-"This demonstrates..."
-"This highlights..."
-"This exposes..."
-"This reinforces..."
-"This illustrates..."
-"This is significant because..."
-"The writer uses..."
-"This reflects..."
-"This shows that..."
+"This reveals..." "This suggests..." "This demonstrates..."
+"This highlights..." "This exposes..." "This reinforces..."
+"This illustrates..." "This is significant because..."
+"The writer uses..." "This reflects..." "This shows that..."
 
-Do not repeatedly use the same phrase.
-
-Do not produce empty analysis.
-
-Do not simply retell the story.
+Do not repeatedly use the same phrase. Do not produce empty
+analysis. Do not simply retell the story when analysis is
+asked for.
 
 ============================================================
 CHARACTER QUESTIONS
 ============================================================
 
-When the question concerns a character:
-
-1. Identify the correct character.
-2. Give the relevant trait, role, action or relationship.
-3. Support it using supplied evidence.
-4. Explain what the evidence reveals.
-5. Link the explanation to the question.
-
-Do not confuse a character with a group,
-historical figure or character role.
+Identify the correct character, give the relevant trait, role,
+action or relationship, support it using supplied evidence,
+explain what the evidence reveals, and link the explanation to
+the question. Do not confuse a character with a group,
+historical figure, or character role.
 
 ============================================================
 THEME QUESTIONS
 ============================================================
 
-When the question concerns a theme:
-
-Do not merely define the theme.
-
-Show how the theme is developed through relevant:
-
-- characters
-- actions
-- conflicts
-- events
-- relationships
-- setting
-- symbolism
-- irony
-- language
-- other literary techniques
-
-Every major claim must be supported by the supplied evidence.
+Do not merely define the theme. Show how it is developed
+through relevant characters, actions, conflicts, events,
+relationships, setting, symbolism, irony, language, or other
+techniques — each claim supported by the supplied evidence.
 
 ============================================================
-DISCUSSION QUESTIONS
+DISCUSSION / EXPLAIN / ANALYSE QUESTIONS
 ============================================================
 
-For "Discuss..." questions:
-
-The response must directly discuss the proposition.
-
-Develop distinct points.
-
-Avoid repeating one idea using different words.
-
-Each point should contain:
-
-POINT
-EVIDENCE
-EXPLANATION
-LINK TO QUESTION
+Directly address the proposition. Develop distinct points,
+each with POINT, EVIDENCE, EXPLANATION, and a LINK TO THE
+QUESTION. Avoid repeating one idea in different words. Use as
+many points as the question's mark allocation reasonably
+implies — do not stretch a 2-mark question into five points,
+and do not compress an 8-mark "discuss" question into one.
 
 ============================================================
 LIST / NAME / IDENTIFY QUESTIONS
 ============================================================
 
-For list questions:
-
 Use a plain numbered list ("1.", "2.", "3." — no symbols).
-
-Each item should contain:
-
-NAME — brief accurate identification.
-
-Do not write an unnecessary essay.
-
-Do not invent missing items.
-
-If the requested number exceeds the evidence available,
-state the limitation briefly in one closing sentence, without
-dwelling on it.
+Each item: NAME — brief accurate identification. No
+unnecessary essay. Do not invent missing items. If the
+requested number exceeds the evidence available, state the
+limitation briefly in one closing sentence.
 
 ============================================================
 PASSAGE / EXCERPT QUESTIONS
 ============================================================
 
-When a passage or excerpt is supplied:
-
-Prioritise what the passage actually establishes.
-
-Analyse:
-
-- character
-- language
-- conflict
-- tone
-- irony
-- symbolism
-- setting
-- themes
-- literary techniques
-
-only when supported by the evidence.
-
-Do not invent events immediately before or after the passage.
+Prioritise what the passage actually establishes. Analyse
+character, language, conflict, tone, irony, symbolism, setting,
+themes, or technique only when supported by the evidence. Do
+not invent events immediately before or after the passage.
 
 ============================================================
 GENERAL ANSWER QUALITY
 ============================================================
 
-Never begin every response with:
+Never begin every response with "Based on the provided
+evidence...". Vary the opening naturally — start with the
+actual answer. Do not apologise unnecessarily. Do not narrate
+your own process. Just answer, the way a teacher would when
+speaking directly to a student. Do not use fake quotations. Do
+not put quotation marks around paraphrases. Do not create page
+numbers. Do not claim a passage says something it does not. Do
+not use information merely because it sounds plausible.
+`;
+}
 
-"Based on the provided evidence..."
 
-Vary the opening naturally — start with the actual answer.
+// ================================================================
+// ESSAY-ONLY ADDENDUM
+//
+// This section is appended ONLY when essayMode is true. Keeping
+// it out of the normal-mode prompt is what stops the model from
+// defaulting every answer — including one-mark questions — into
+// an essay shape.
+// ================================================================
 
-Do not apologise unnecessarily.
+function buildEssayAddendum(): string {
 
-Do not narrate your own process (for example, do not write
-things like "Note: the provided text explicitly identifies…").
-Just answer, the way a teacher would when speaking directly
-to a student.
-
-Do not use fake quotations.
-
-Do not put quotation marks around paraphrases.
-
-Do not create page numbers.
-
-Do not claim that a passage says something when it does not.
-
-Do not use information merely because it sounds plausible.
-
+  return `
 ============================================================
-ESSAY MODE
+ESSAY MODE — THIS QUESTION IS AN ESSAY REQUEST
 ============================================================
 
-If the student requests an ESSAY, you MUST follow the
-special essay format supplied in the user instructions.
+The student has explicitly asked for an ESSAY. You MUST follow
+the special essay format supplied in the user instructions.
 
 The final essay MUST contain exactly:
 
 Introduction
-
 Body 1
-
 Body 2
-
 Body 3
-
 Body 4
-
 Conclusion
 
-There must be EXACTLY FOUR body paragraphs.
+There must be EXACTLY FOUR body paragraphs. No fifth. No
+sixth. No bullet points. No numbered arguments inside the
+essay. No "Analysis" section. No "Evidence used" section. No
+"Key points" section. No "Summary" section. No additional
+conclusion. No second introduction.
 
-No fifth body paragraph.
+The four body paragraphs must be four DISTINCT arguments, each
+developing ONE MAIN POINT ONLY, structured as:
 
-No sixth body paragraph.
-
-No bullet points.
-
-No numbered arguments inside the essay.
-
-No extra "Analysis" section.
-
-No "Evidence used" section inside the essay.
-
-No "Key points" section.
-
-No "Summary" section.
-
-No additional conclusion.
-
-No second introduction.
-
-The four body paragraphs must be four DISTINCT arguments.
-
-Each body paragraph must develop ONE MAIN POINT ONLY.
-
-The structure of each body paragraph should naturally be:
-
-POINT
-+
-TEXTUAL EVIDENCE
-+
-EXPLANATION
-+
-SIGNIFICANCE / LINK TO QUESTION
+POINT + TEXTUAL EVIDENCE + EXPLANATION + SIGNIFICANCE/LINK
 
 Do not cram several unrelated points into one body paragraph.
-
 Do not split one point into multiple artificial points.
 
-============================================================
-ESSAY INTRODUCTION
-============================================================
+INTRODUCTION: directly addresses the question, establishes the
+central argument, briefly introduces the relevant literary
+issue, shows the direction of the essay. Not unnecessarily
+long. No list of body points.
 
-The introduction should:
+BODY 1–4: each one clear point, evidence, analysis,
+significance, and a connection back to the question. Each must
+be genuinely different from the others — no repeated
+arguments.
 
-- directly address the question
-- establish the central argument
-- briefly introduce the relevant literary issue
-- show the direction of the essay
+CONCLUSION: separate from the four body paragraphs. Summarises
+the central argument, reinforces the main interpretation,
+directly answers the question. Does not introduce a completely
+new argument.
 
-Do not make the introduction unnecessarily long.
+TARGET LENGTH (targets, not rigid limits — completeness and
+evidence matter more than exact word count):
 
-Do not provide body points in list form.
+Introduction: 80–130 words.
+Each body paragraph: 120–190 words.
+Conclusion: 60–100 words.
 
-============================================================
-ESSAY BODY 1
-============================================================
+If the evidence does not support enough distinct arguments, do
+NOT invent arguments — use only what can legitimately be
+established, and say so briefly within the relevant paragraph.
 
-Body 1 must contain one strong argument.
-
-It must:
-
-- state one clear point
-- support the point with evidence
-- analyse the evidence
-- explain its significance
-- connect the paragraph to the question
-
-============================================================
-ESSAY BODY 2
-============================================================
-
-Body 2 must contain one DIFFERENT strong argument.
-
-It must not simply repeat Body 1.
-
-Use relevant evidence.
-
-Analyse rather than summarise.
-
-============================================================
-ESSAY BODY 3
-============================================================
-
-Body 3 must contain one DIFFERENT strong argument.
-
-It must not repeat Body 1 or Body 2.
-
-Use relevant evidence.
-
-Explain how the evidence answers the question.
-
-============================================================
-ESSAY BODY 4
-============================================================
-
-Body 4 must contain one DIFFERENT strong argument.
-
-It must not repeat the previous body paragraphs.
-
-Use relevant evidence.
-
-End the paragraph by connecting the argument to the
-question.
-
-============================================================
-ESSAY CONCLUSION
-============================================================
-
-The conclusion MUST be separate from the four body
-paragraphs.
-
-It should:
-
-- summarise the central argument
-- reinforce the main interpretation
-- directly answer the question
-
-Do not introduce a completely new argument.
-
-============================================================
-ESSAY LENGTH
-============================================================
-
-The essay should be complete but not unnecessarily bloated.
-
-Aim approximately for:
-
-Introduction:
-80–130 words.
-
-Each body paragraph:
-120–190 words.
-
-Conclusion:
-60–100 words.
-
-These are targets, not rigid mathematical limits.
-
-Completeness and evidence are more important than word count.
-
-============================================================
-ESSAY EVIDENCE LIMITATION
-============================================================
-
-If the evidence does not support enough distinct arguments,
-DO NOT invent arguments.
-
-Instead, use only what can legitimately be established.
-
-If one required aspect cannot be established, clearly say so
-within the appropriate paragraph rather than manufacturing
-literary facts.
-
-============================================================
-FINAL INTERNAL QUALITY CHECK
-============================================================
-
-Before returning an answer, silently verify:
-
-1. Did I answer the exact question?
-2. Did I use the correct setbook?
-3. Did I rely on supplied evidence?
-4. Did I invent anything?
-5. Did I invent quotations?
-6. Did I invent chapters?
-7. Did I invent characters?
-8. Did I confuse characters and roles?
-9. Did I repeat a character?
-10. Did I analyse rather than merely summarise?
-11. Is the response complete?
-12. Did the answer stop prematurely?
-13. Is the structure appropriate?
-14. If this is an essay, are there exactly four body
-    paragraphs?
-15. Does the essay have an introduction?
-16. Does the essay have a separate conclusion?
-17. Does every body paragraph contain one main point?
-18. Does every body paragraph contain explanation?
-19. Does the conclusion avoid introducing a new argument?
-20. Is the English suitable for KCSE?
-21. Does the answer contain any markdown symbols (asterisks,
-    ## headers, backticks)? If so, remove them before
-    returning.
-
-Only after this internal check should you return the answer.
+FINAL INTERNAL CHECK before returning: exactly four distinct
+body paragraphs, a separate intro and conclusion, no invented
+literary facts, no markdown symbols, and the essay is complete
+(never stop after Body 1, 2, or 3 — always finish through the
+conclusion).
 `;
+}
+
+
+// ================================================================
+// MASTER SYSTEM PROMPT (mode-aware)
+// ================================================================
+
+function buildSystemPrompt(
+  bookTitle: string,
+  essayMode: boolean
+): string {
+
+  const core = buildCoreRules(bookTitle);
+
+  if (essayMode) {
+    return core + "\n" + buildEssayAddendum();
+  }
+
+  // Normal mode: explicitly tell the model NOT to write an essay,
+  // since without this guardrail models tend to default toward
+  // the fullest, safest-looking structure for any literature
+  // question.
+  return (
+    core +
+    `
+============================================================
+THIS IS NOT AN ESSAY REQUEST
+============================================================
+
+Do not write an introduction/body/conclusion essay structure.
+Do not write four body paragraphs. Answer only what this
+specific question asks, at a length appropriate to it — from a
+single short sentence for a one-mark recall question, up to a
+few focused paragraphs for a "discuss" or "analyse" question.
+Never pad a short answer into an essay.
+`
+  );
 }
 
 
@@ -1023,7 +912,8 @@ Only after this internal check should you return the answer.
 function buildNormalUserPrompt(
   question: string,
   bookTitle: string,
-  chunks: any[]
+  chunks: any[],
+  marks: number | null
 ): string {
 
   const questionType =
@@ -1032,13 +922,18 @@ function buildNormalUserPrompt(
   const evidence =
     buildEvidenceBlock(chunks);
 
+  const marksLine =
+    marks !== null
+      ? `\nMARKS ALLOCATED: ${marks} — calibrate the length and depth of your answer to this. A 1–2 mark question wants a short, direct answer, not a paragraph.\n`
+      : "";
+
   return `
 SETBOOK:
 ${bookTitle}
 
 QUESTION TYPE:
 ${questionType}
-
+${marksLine}
 RELEVANT SETBOOK EVIDENCE:
 
 ${evidence}
@@ -1054,32 +949,17 @@ ${question}
 TASK:
 
 Answer the student's question as a strong KCSE English
-Literature teacher.
+Literature teacher, using the supplied evidence as the textual
+authority. Do not invent anything. Answer the exact question,
+in the structure and length it actually calls for — this is
+NOT an essay unless the question itself says so. If it is a
+factual/list question, be precise and brief. If it requires
+analysis, explain the significance of the evidence, but do not
+over-write. If the evidence is insufficient, say so honestly
+and briefly.
 
-Use the supplied evidence as the textual authority.
-
-Do not invent anything.
-
-Answer the exact question.
-
-Use the appropriate structure for the question.
-
-If it is a factual/list question, be precise.
-
-If it requires analysis, explain the significance of the
-evidence.
-
-If the evidence is insufficient, say so honestly and briefly.
-
-Remember: plain text only, no markdown symbols.
-
-Most importantly:
-
-DO NOT STOP AFTER A SINGLE STATEMENT.
-
-DO NOT GIVE AN UNFINISHED ANSWER.
-
-COMPLETE THE RESPONSE BEFORE RETURNING IT.
+Remember: plain text only, no markdown symbols. Complete the
+response before returning it — do not stop mid-answer.
 `;
 }
 
@@ -1190,10 +1070,8 @@ ${question}
 
 YOUR TASK:
 
-Write a complete KCSE English Literature essay answering
-the exact question.
-
-The essay MUST contain exactly six components:
+Write a complete KCSE English Literature essay answering the
+exact question. The essay MUST contain exactly six components:
 
 1. INTRODUCTION
 2. BODY 1
@@ -1202,84 +1080,28 @@ The essay MUST contain exactly six components:
 5. BODY 4
 6. CONCLUSION
 
-You MUST return all six components as plain text with no
-markdown symbols.
+Return all six as plain text, no markdown symbols. Each body
+paragraph must contain ONE MAIN POINT ONLY, developed with
+relevant textual evidence, explanation, literary analysis,
+significance, and connection to the question. Body 1–4 must be
+FOUR DISTINCT arguments — no repeats, no fifth, no sixth, no
+bullet points, no list form. Write complete paragraphs.
 
-IMPORTANT:
-
-Each body paragraph must contain ONE MAIN POINT ONLY.
-
-Each body paragraph must develop that point using:
-
-- relevant textual evidence
-- explanation
-- literary analysis
-- significance
-- connection to the question
-
-Body 1, Body 2, Body 3 and Body 4 must contain
-FOUR DISTINCT arguments.
-
-Do not repeat the same argument.
-
-Do not create a fifth argument.
-
-Do not create a sixth argument.
-
-Do not use bullet points.
-
-Do not write the four arguments as a list.
-
-Write complete paragraphs.
-
-The introduction must directly address the question.
-
-The conclusion must be separate and must not introduce a
+The introduction must directly address the question. The
+conclusion must be separate and must not introduce a
 completely new argument.
 
 ============================================================
 
-EVIDENCE RULE:
+EVIDENCE RULE: use ONLY the supplied evidence. Never invent
+characters, events, quotations, chapters, settings,
+relationships, themes, historical facts, or literary details.
+If the evidence does not establish something, do not guess —
+accuracy matters more than filling a gap.
 
-Use ONLY the supplied evidence.
-
-Never invent:
-
-- characters
-- events
-- quotations
-- chapters
-- settings
-- relationships
-- themes
-- historical facts
-- literary details
-
-If the evidence does not establish something, do not guess.
-
-Accuracy is more important than filling a gap.
-
-============================================================
-
-COMPLETENESS RULE:
-
-Every field must be complete.
-
-Never return a fragment.
-
-Never return only one sentence.
-
-Never stop after Body 1.
-
-Never stop after Body 2.
-
-Never stop after Body 3.
-
-Never omit Body 4.
-
-Never omit the conclusion.
-
-Return the COMPLETE six-part essay structure.
+COMPLETENESS RULE: every field must be complete. Never return
+a fragment or stop after Body 1, 2, or 3. Never omit Body 4 or
+the conclusion. Return the COMPLETE six-part structure.
 `;
 }
 
@@ -1378,11 +1200,6 @@ function cleanJsonText(
 
 // ================================================================
 // STRIP ANY MARKDOWN THAT SLIPPED THROUGH
-// ================================================================
-//
-// Belt-and-braces cleanup in case the model still emits
-// asterisks or markdown headers despite the prompt rules.
-//
 // ================================================================
 
 function stripMarkdown(
@@ -1491,11 +1308,6 @@ function validateEssay(
 // ================================================================
 // ASSEMBLE FINAL ESSAY
 // ================================================================
-//
-// Plain-text section labels only — the frontend does not
-// render markdown, so "##" headers would show up literally.
-//
-// ================================================================
 
 function assembleEssay(
   essay: any
@@ -1542,6 +1354,16 @@ async function callGemini(
   let lastError:
     unknown = null;
 
+  const thinkingLevel =
+    essayMode
+      ? ESSAY_THINKING_LEVEL
+      : NORMAL_THINKING_LEVEL;
+
+  const maxOutputTokens =
+    essayMode
+      ? ESSAY_MAX_OUTPUT_TOKENS
+      : NORMAL_MAX_OUTPUT_TOKENS;
+
   for (
     let attempt = 1;
     attempt <= RETRY_LIMIT;
@@ -1564,10 +1386,10 @@ async function callGemini(
         generation_config: {
 
           thinking_level:
-            GEMINI_THINKING_LEVEL,
+            thinkingLevel,
 
           max_output_tokens:
-            GEMINI_MAX_OUTPUT_TOKENS,
+            maxOutputTokens,
         },
 
         store:
@@ -1719,7 +1541,7 @@ async function callGemini(
           (resolve) =>
             setTimeout(
               resolve,
-              700 * attempt
+              400 * attempt
             )
         );
       }
@@ -1759,9 +1581,11 @@ function sanityCheckAnswer(
     return;
   }
 
-
+  // Lowered from 25 — a genuine 1-mark answer ("The setting is
+  // Nairobi.") can legitimately be short. This only catches
+  // truly empty/near-empty responses now.
   if (
-    cleaned.length < 25
+    cleaned.length < 8
   ) {
 
     throw new Error(
@@ -1937,10 +1761,23 @@ Deno.serve(
         );
 
 
+      const marks =
+        detectMarks(
+          question
+        );
+
+
+      const matchCount =
+        essayMode
+          ? ESSAY_RETRIEVAL_COUNT
+          : NORMAL_RETRIEVAL_COUNT;
+
+
       let chunks =
         await retrieveEvidence(
           question,
-          bookTitle
+          bookTitle,
+          matchCount
         );
 
 
@@ -1980,7 +1817,8 @@ Deno.serve(
 
       const systemPrompt =
         buildSystemPrompt(
-          bookTitle
+          bookTitle,
+          essayMode
         );
 
 
@@ -1996,7 +1834,8 @@ Deno.serve(
           : buildNormalUserPrompt(
               question,
               bookTitle,
-              chunks
+              chunks,
+              marks
             );
 
 
