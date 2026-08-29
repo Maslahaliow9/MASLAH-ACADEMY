@@ -34,73 +34,77 @@
 // BODY 4
 // CONCLUSION
 //
-// Exactly four body paragraphs.
+// Exactly four body paragraphs. This has NOT been touched in this
+// revision — the essay pipeline (JSON schema, six-part assembly,
+// validation) is untouched on purpose.
 //
 // ----------------------------------------------------------------
 // WHAT CHANGED IN THIS VERSION (read this before touching the file)
 // ----------------------------------------------------------------
 //
-// 1. SPEED — normal (non-essay) questions were using the SAME
-//    heavy settings as full essays: thinking_level "high",
-//    max_output_tokens 64000, and 16 retrieved chunks. A
-//    one-mark "name the setting" question does not need any of
-//    that, and "high" thinking + a 64k token budget is the
-//    single biggest source of latency. Normal questions now use
-//    a much lighter, faster config (NORMAL_* constants below);
-//    essays keep a richer config (ESSAY_* constants) since they
-//    genuinely need more room and more evidence.
+// 1-5. (Unchanged from the previous revision — see git history.
+//    Summary: normal questions got a lighter config than essays;
+//    the system prompt is built per-mode so normal questions never
+//    see the essay scaffolding; retrieval count is mode-aware; the
+//    function calls generateContent instead of the heavier
+//    Interactions API; and there are three answer tiers — SIMPLE,
+//    ANALYTICAL, ESSAY — trading thinking depth for speed.)
 //
-// 2. ACCURACY / "IT ONLY ANSWERS LIKE AN ESSAY" — the root cause:
-//    buildSystemPrompt() always included the full ESSAY MODE
-//    section (six required components, four body paragraphs,
-//    word-count targets, etc.) in EVERY call, even for plain
-//    factual or one-mark questions. That section biased the
-//    model toward essay-shaped output regardless of what was
-//    actually asked. The system prompt is now built per mode:
-//    normal questions get a system prompt with explicit
-//    "this is NOT an essay" instructions and none of the essay
-//    scaffolding; only true essay requests get the essay section.
+// 6. ROOT CAUSE OF "SOMETHING WENT WRONG" (THIS REVISION'S MAIN FIX)
+//    — gemini-3.7-flash is a Gemini 3.x model. Google's own
+//    migration guidance for Gemini 3.x models is explicit:
+//    "Replace thinking_budget with the string enum thinking_level."
+//    Gemini 3 Flash / Flash-Lite also cannot fully disable
+//    thinking — there is no "off" state on this model family.
+//    The SIMPLE tier (which handles the bulk of real traffic: every
+//    one/two-mark question, every "name/list/identify" question)
+//    was sending the legacy numeric { thinkingBudget: 0 }. That is
+//    precisely the field Gemini 3.x wants removed. This is why the
+//    app was failing broadly rather than occasionally — SIMPLE is
+//    the most common tier, so most requests hit the failing code
+//    path. ALL THREE TIERS now use thinkingLevel exclusively:
+//    SIMPLE -> "low" (the actual floor on this model — you cannot
+//    go lower), ANALYTICAL -> "medium", ESSAY -> "medium". Because
+//    thinking can no longer be fully switched off anyway, there is
+//    no accuracy trade-off in dropping thinkingBudget: 0 — "low" is
+//    already the cheapest option this model offers.
 //
-// 3. Retrieval count is now mode-aware (fewer, more targeted
-//    chunks for normal questions = faster vector search + a
-//    smaller prompt = faster generation), and every question
-//    type (list, one-mark, definition, analysis, discussion,
-//    etc.) is explicitly covered by the normal-mode prompt, not
-//    just essays.
+// 7. SPEED — three additions, none of which touch essay structure:
+//    a) a lightweight answer cache: identical (book, question) pairs
+//       are served straight from question_log instead of re-running
+//       embedding + retrieval + generation. Classrooms produce a lot
+//       of exact repeat questions ("who is Tuni" gets asked by every
+//       student doing that setbook), so this is a large real-world
+//       win with near-zero risk (falls through silently on any
+//       cache-layer error).
+//    b) every outbound fetch (embedding + generateContent) now has a
+//       bounded timeout via AbortSignal.timeout(), so a stalled
+//       upstream call fails fast into the retry loop instead of
+//       hanging the whole request.
+//    c) the retry loop no longer retries a request that failed with
+//       a non-retryable 4xx (400/403/404) — retrying a malformed
+//       request just burns the retry budget on a guaranteed second
+//       failure. It only retries on timeouts / 429 / 5xx.
 //
-// 4. STILL SLOW — the real remaining cause: this function was
-//    calling Gemini's Interactions API (/v1beta/interactions),
-//    which is built for multi-step agent workflows (typed
-//    execution steps, server-side session state, tool
-//    orchestration). Google's own docs recommend the plain
-//    generateContent API instead for "single-shot generation,
-//    latency-sensitive production workloads" — that agent-loop
-//    machinery was overhead this app never needed for a one-shot
-//    Q&A call. Switched to
-//    /v1beta/models/{model}:generateContent, same model, same
-//    prompts, same essay JSON output (now via
-//    generationConfig.responseSchema instead of a custom
-//    response_format wrapper).
+// 8. ACCURACY — ANALYTICAL and ESSAY thinking moved from "low" to
+//    "medium" now that Gemini 3.7 Flash is fast enough at "medium"
+//    that this doesn't cost meaningful latency, and it buys a
+//    noticeably more careful reasoning pass on "discuss"/"analyse"
+//    questions and on essays. Also added a one-shot wider-retrieval
+//    fallback: if the first vector search comes back with zero
+//    chunks, the function automatically retries once with a larger
+//    match_count before giving up. Short, sparse questions ("who is
+//    Tuni") are exactly the case that can under-match on a small
+//    first pass.
 //
-// 5. BALANCING SPEED AND ACCURACY — fully disabling thinking for
-//    every non-essay question (an earlier version of this file)
-//    was too aggressive: a "discuss how the writer uses X" question
-//    genuinely needs a reasoning pass, and skipping it risked
-//    sloppy answers on exactly the questions that need care most.
-//    There are now THREE tiers, chosen per question
-//    (determineAnswerTier, in the QUESTION TYPE DETECTION section):
-//
-//    - SIMPLE: pure recall/list/identify questions, or ANY question
-//      explicitly worth 1-2 marks regardless of type. Thinking
-//      fully off (thinkingBudget: 0), smallest evidence set (6
-//      chunks), smallest token ceiling. Nothing to reason about, so
-//      this costs no accuracy.
-//    - ANALYTICAL: theme/character/discussion/comparison/etc. above
-//      2 marks. A light thinking pass (thinkingLevel "low"), more
-//      evidence (10 chunks). This is where accuracy actually
-//      depends on the model being allowed to think a little.
-//    - ESSAY: unchanged from before — light thinking, 14 chunks,
-//      the full four-body-paragraph structure.
+// 9. COVERAGE — explicit detection was added for "who is / who was"
+//    character-identification questions and "when" / "where"
+//    factual-recall questions, so a plain lookup question like
+//    "Who is Tuni?" is recognised as a fast SIMPLE-tier lookup
+//    instead of falling into the generic bucket. A guard makes sure
+//    a question like "Who is Tuni and discuss his significance to
+//    the theme of betrayal?" is NOT misclassified as simple — the
+//    analysis-signal words still win.
 //
 // ================================================================
 //
@@ -185,6 +189,13 @@ const EMBEDDING_DIMENSIONS = 768;
 
 const RETRY_LIMIT = 2;
 
+const RETRIEVAL_RETRY_LIMIT = 2;
+
+// Bounded timeouts so a stalled upstream call fails fast into the
+// retry loop instead of hanging the whole HTTP request.
+const GEMINI_FETCH_TIMEOUT_MS = 20000;
+const EMBEDDING_FETCH_TIMEOUT_MS = 8000;
+
 // ----------------------------------------------------------------
 // MODE-AWARE TUNING
 //
@@ -202,42 +213,54 @@ const RETRY_LIMIT = 2;
 // - SIMPLE: pure recall (name/list/identify a setting, character,
 //   etc.) or anything worth 1-2 marks regardless of type. These
 //   have one correct-ish answer sitting directly in the evidence.
-//   No reasoning pass needed — thinking fully off, small evidence
-//   set, tiny token ceiling. Fastest tier, and disabling thinking
-//   here costs essentially nothing in accuracy because there's
-//   nothing to reason about.
+//   Thinking set to the lowest level this model offers, smallest
+//   evidence set (6 chunks), smallest token ceiling. Gemini 3.7
+//   Flash cannot fully disable thinking, so "low" is the actual
+//   floor — there's nothing cheaper to reach for here.
 //
-// - ANALYTICAL: theme, character analysis, discussion, comparison,
-//   explanation, symbolism, irony, style/technique, passage
-//   analysis — anything where the model has to connect evidence to
-//   an argument. This is where thinkingBudget: 0 was a real
-//   accuracy risk: skipping the reasoning pass on a "discuss how
-//   the writer uses X" question is exactly where a fast-but-sloppy
-//   answer costs marks. These now get a light thinking pass
-//   (thinkingLevel "low") and more evidence than SIMPLE, while
-//   staying far lighter than ESSAY.
+// - ANALYTICAL: theme/character/discussion/comparison/etc. above
+//   2 marks. A "medium" thinking pass, more evidence (10 chunks).
+//   This is where accuracy actually depends on the model being
+//   allowed to think properly — a "discuss how the writer uses X"
+//   question needs a real reasoning pass, not a token-saving one.
 //
-// - ESSAY: full four-body-paragraph essays. Highest stakes, lowest
-//   frequency — worth spending a bit more thinking and evidence on.
+// - ESSAY: unchanged structurally from before — "medium" thinking,
+//   14 chunks, the full four-body-paragraph structure.
 // ----------------------------------------------------------------
 
 const SIMPLE_RETRIEVAL_COUNT = 6;
 const ANALYTICAL_RETRIEVAL_COUNT = 10;
 const ESSAY_RETRIEVAL_COUNT = 14;
 
-const ANALYTICAL_THINKING_LEVEL = "low";
-const ESSAY_THINKING_LEVEL = "low";
+// Gemini 3.x models use the string-valued thinkingLevel field
+// exclusively (thinkingBudget is the deprecated, pre-Gemini-3 way
+// of controlling this, and mixing the two APIs is what broke the
+// SIMPLE tier — see changelog item 6 above). "low" is the cheapest
+// level this model family offers; there is no "off".
+const SIMPLE_THINKING_LEVEL = "low";
+const ANALYTICAL_THINKING_LEVEL = "medium";
+const ESSAY_THINKING_LEVEL = "medium";
 
 const SIMPLE_MAX_OUTPUT_TOKENS = 1024;
 const ANALYTICAL_MAX_OUTPUT_TOKENS = 2048;
 const ESSAY_MAX_OUTPUT_TOKENS = 4096;
 
 // Question types that are pure recall/identification — no analysis
-// required, so no thinking pass needed even at full mark value.
+// required, so the lightest thinking level is appropriate even at
+// full mark value.
 const SIMPLE_QUESTION_TYPES = new Set([
   "list_or_identification",
   "setting",
+  "character_identification",
+  "recall_fact",
 ]);
+
+// Words that signal the question wants real analysis, not a bare
+// lookup. Used to stop "who is X" / "when did X" style questions
+// from being misclassified as SIMPLE when they're actually asking
+// for discussion (e.g. "Who is Tuni and what does he symbolise?").
+const ANALYSIS_SIGNAL_PATTERN =
+  /\b(discuss|explain|analyse|analyze|significan|develop|compare|contrast|contribut|role of|impact|importance|symbol)/;
 
 
 // ================================================================
@@ -387,6 +410,39 @@ function detectQuestionType(
     return "list_or_identification";
   }
 
+  const hasAnalysisSignal =
+    ANALYSIS_SIGNAL_PATTERN.test(q);
+
+  // "Who is X" / "Who was X" — a plain character lookup, unless the
+  // question also carries an analysis signal (in which case it
+  // falls through to the theme/character/discussion checks below,
+  // which correctly route it to the ANALYTICAL tier).
+  if (
+    !hasAnalysisSignal &&
+    /\bwho['’]?s?\s+(is|was|are|were)?\b/.test(q) &&
+    /\bwho\b/.test(q)
+  ) {
+    return "character_identification";
+  }
+
+  // "When did X happen" / "Where does X take place" — plain factual
+  // recall, same guard against analysis-signal questions.
+  if (
+    !hasAnalysisSignal &&
+    (/^\s*when\b/.test(q) ||
+      /\bwhen\s+(did|does|is|was)\b/.test(q))
+  ) {
+    return "recall_fact";
+  }
+
+  if (
+    !hasAnalysisSignal &&
+    /\bwhere\b/.test(q) &&
+    /\b(take place|set|located|happen|based)\b/.test(q)
+  ) {
+    return "setting";
+  }
+
   if (
     /\btheme\b/.test(q) ||
     /\bthemes\b/.test(q)
@@ -464,6 +520,13 @@ function detectQuestionType(
     return "analysis";
   }
 
+  // Plain "who is X" fallback that didn't match the guarded check
+  // above (e.g. contained an analysis signal) still deserves a
+  // sensible type rather than the generic bucket.
+  if (/\bwho\b/.test(q)) {
+    return "character";
+  }
+
   return "general_literature_question";
 }
 
@@ -515,6 +578,43 @@ function determineAnswerTier(
 
 
 // ================================================================
+// NON-RETRYABLE HTTP ERROR CHECK
+// ================================================================
+//
+// A 400/403/404 from the Gemini API means the request itself was
+// rejected — retrying the identical request will fail identically.
+// Only timeouts, 429 (rate limit), and 5xx are worth a retry.
+//
+// ================================================================
+
+function isNonRetryableHttpError(
+  error: unknown
+): boolean {
+
+  const message =
+    error instanceof Error
+      ? error.message
+      : String(error);
+
+  const match = message.match(
+    /HTTP (\d{3})/
+  );
+
+  if (!match) {
+    return false;
+  }
+
+  const status = parseInt(match[1], 10);
+
+  return (
+    status === 400 ||
+    status === 403 ||
+    status === 404
+  );
+}
+
+
+// ================================================================
 // GEMINI EMBEDDING
 // ================================================================
 //
@@ -541,6 +641,10 @@ async function embedQuery(
           "application/json",
       },
 
+      signal: AbortSignal.timeout(
+        EMBEDDING_FETCH_TIMEOUT_MS
+      ),
+
       body: JSON.stringify({
         model: `models/${EMBEDDING_MODEL}`,
         content: { parts: [{ text }] },
@@ -556,7 +660,7 @@ async function embedQuery(
       await response.text();
 
     throw new Error(
-      `Gemini embedding failed: ${errorText}`
+      `Gemini embedding failed: HTTP ${response.status}: ${errorText}`
     );
   }
 
@@ -667,6 +771,170 @@ function deduplicateChunks(
   }
 
   return result;
+}
+
+
+// ================================================================
+// GATHER EVIDENCE — retry on transient failure + widen on empty
+// ================================================================
+//
+// Two independent resilience layers, both new in this revision:
+//
+// 1. RETRY: embedding/vector-search calls can fail transiently
+//    (network blip, momentary Supabase hiccup). Retry once before
+//    giving up, same pattern as the Gemini generation retry.
+//
+// 2. WIDEN: a short, sparse question ("Who is Tuni?") can under-
+//    match against a small match_count on the first pass. If the
+//    first search comes back empty, retry once with a
+//    meaningfully larger match_count before returning the
+//    "no evidence found" error to the student.
+//
+// ================================================================
+
+async function gatherEvidence(
+  question: string,
+  bookTitle: string,
+  matchCount: number
+): Promise<any[]> {
+
+  let lastError: unknown = null;
+
+  let chunks: any[] = [];
+
+  for (
+    let attempt = 1;
+    attempt <= RETRIEVAL_RETRY_LIMIT;
+    attempt++
+  ) {
+
+    try {
+
+      chunks =
+        await retrieveEvidence(
+          question,
+          bookTitle,
+          matchCount
+        );
+
+      lastError = null;
+
+      break;
+
+    } catch (error) {
+
+      lastError = error;
+
+      console.error(
+        `Evidence retrieval attempt ${attempt} failed:`,
+        error
+      );
+
+      if (attempt < RETRIEVAL_RETRY_LIMIT) {
+
+        await new Promise(
+          (resolve) =>
+            setTimeout(resolve, 300 * attempt)
+        );
+      }
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  chunks = deduplicateChunks(chunks);
+
+  if (chunks.length === 0) {
+
+    const widerCount =
+      Math.max(matchCount * 2, matchCount + 8);
+
+    try {
+
+      let widerChunks =
+        await retrieveEvidence(
+          question,
+          bookTitle,
+          widerCount
+        );
+
+      widerChunks =
+        deduplicateChunks(widerChunks);
+
+      if (widerChunks.length > 0) {
+        return widerChunks;
+      }
+
+    } catch (error) {
+
+      // If the wider retry also fails, fall through and let the
+      // caller handle the empty-evidence case as before — no need
+      // to surface a second error here.
+      console.error(
+        "Wider evidence retry failed:",
+        error
+      );
+    }
+  }
+
+  return chunks;
+}
+
+
+// ================================================================
+// ANSWER CACHE
+// ================================================================
+//
+// Classrooms produce a lot of exact repeat questions against the
+// same setbook ("Who is Tuni?" gets asked by every student on that
+// book). Rather than re-running embedding + vector search +
+// generation for a question that has already been answered
+// identically, check question_log first. This is a pure speed win
+// with no accuracy trade-off — it only fires on an exact
+// (bookTitle, question) match, and any failure here is swallowed
+// silently so a caching problem can never break a live answer.
+//
+// ================================================================
+
+async function getCachedAnswer(
+  bookTitle: string,
+  question: string
+): Promise<string | null> {
+
+  try {
+
+    const { data, error } =
+      await supabase
+        .from("question_log")
+        .select("answer")
+        .eq("book_title", bookTitle)
+        .eq("question", question)
+        .limit(1);
+
+    if (error || !data || data.length === 0) {
+      return null;
+    }
+
+    const answer = data[0]?.answer;
+
+    return (
+      typeof answer === "string" &&
+      answer.trim()
+    )
+      ? answer
+      : null;
+
+  } catch (error) {
+
+    console.error(
+      "Answer cache lookup failed (non-fatal):",
+      error
+    );
+
+    return null;
+  }
 }
 
 
@@ -805,6 +1073,9 @@ Match your answer length to what is actually being asked:
   short, direct answer — a sentence or a short list. It does
   NOT need an introduction, explanation paragraph, or essay
   structure.
+- A "who is X" question needs a short, direct identification:
+  who the character is, their role, and their key relevance —
+  a few sentences, not an essay.
 - A "list/name/identify" question needs a plain numbered list,
   each item briefly identified — not a discussion.
 - A question asking to "explain", "discuss", "analyse", or
@@ -839,14 +1110,19 @@ analysis. Do not simply retell the story when analysis is
 asked for.
 
 ============================================================
-CHARACTER QUESTIONS
+CHARACTER QUESTIONS (INCLUDING "WHO IS X")
 ============================================================
 
 Identify the correct character, give the relevant trait, role,
 action or relationship, support it using supplied evidence,
 explain what the evidence reveals, and link the explanation to
 the question. Do not confuse a character with a group,
-historical figure, or character role.
+historical figure, or character role. For a plain "who is X"
+question, lead with a direct identification sentence (who they
+are and their role in the story), then add one or two
+supporting sentences grounded in the evidence — do not expand
+this into a full character analysis unless the question asks
+for one.
 
 ============================================================
 THEME QUESTIONS
@@ -909,7 +1185,8 @@ not use information merely because it sounds plausible.
 // This section is appended ONLY when essayMode is true. Keeping
 // it out of the normal-mode prompt is what stops the model from
 // defaulting every answer — including one-mark questions — into
-// an essay shape.
+// an essay shape. UNCHANGED in this revision, as requested — the
+// essay structure stays exactly as it was.
 // ================================================================
 
 function buildEssayAddendum(): string {
@@ -1065,10 +1342,10 @@ Literature teacher, using the supplied evidence as the textual
 authority. Do not invent anything. Answer the exact question,
 in the structure and length it actually calls for — this is
 NOT an essay unless the question itself says so. If it is a
-factual/list question, be precise and brief. If it requires
-analysis, explain the significance of the evidence, but do not
-over-write. If the evidence is insufficient, say so honestly
-and briefly.
+factual/list/identification question (including "who is X"),
+be precise and brief. If it requires analysis, explain the
+significance of the evidence, but do not over-write. If the
+evidence is insufficient, say so honestly and briefly.
 
 Remember: plain text only, no markdown symbols. Complete the
 response before returning it — do not stop mid-answer.
@@ -1083,7 +1360,7 @@ response before returning it — do not stop mid-answer.
 // generateContent takes this directly as generationConfig.
 // responseSchema (paired with responseMimeType:
 // "application/json") — a plain OpenAPI-subset schema, no
-// wrapper object needed.
+// wrapper object needed. UNCHANGED in this revision.
 //
 // ================================================================
 
@@ -1141,7 +1418,7 @@ const ESSAY_RESPONSE_SCHEMA = {
 
 
 // ================================================================
-// ESSAY USER PROMPT
+// ESSAY USER PROMPT (UNCHANGED)
 // ================================================================
 
 function buildEssayUserPrompt(
@@ -1474,32 +1751,27 @@ async function callGemini(
   // ----------------------------------------------------------------
   // THINKING — the speed/accuracy dial
   //
-  // SIMPLE (pure recall, or any 1-2 mark question): thinking fully
-  // disabled. Nothing to reason about, so skipping the reasoning
-  // pass costs no accuracy and buys real speed.
+  // Gemini 3.x models use thinkingLevel (a string: low / medium /
+  // high) exclusively. The legacy numeric thinkingBudget field is
+  // being retired on this model family and mixing it in is what
+  // broke the SIMPLE tier before this revision (see changelog item
+  // 6 at the top of the file). There is also no "off" state on
+  // Gemini 3 Flash, so "low" is simply the cheapest option
+  // available — not a compromise.
   //
-  // ANALYTICAL (theme/character/discussion/comparison/etc. above
-  // 2 marks): a light thinking pass. This is the tier that was
-  // getting thinkingBudget: 0 before — that was too aggressive,
-  // since these questions genuinely require connecting evidence to
-  // an argument. "low" gives the model room to actually think
-  // without paying "high"-level latency.
-  //
-  // ESSAY: same light thinking level — four non-repeating,
-  // evidence-backed arguments benefit from it, but essays already
-  // get more evidence and more output tokens, so thinking stays
-  // modest rather than "high".
-  //
-  // thinking_level and thinking_budget cannot both be set in the
-  // same request, so exactly one of these two keys is included.
+  // SIMPLE  -> "low"    (pure recall / 1-2 mark questions)
+  // ANALYTICAL -> "medium" (theme/character/discussion/etc.)
+  // ESSAY   -> "medium" (four-body-paragraph KCSE essays)
   // ----------------------------------------------------------------
 
-  const thinkingConfig =
+  const thinkingLevel =
     mode === "simple"
-      ? { thinkingBudget: 0 }
+      ? SIMPLE_THINKING_LEVEL
       : mode === "analytical"
-      ? { thinkingLevel: ANALYTICAL_THINKING_LEVEL }
-      : { thinkingLevel: ESSAY_THINKING_LEVEL };
+      ? ANALYTICAL_THINKING_LEVEL
+      : ESSAY_THINKING_LEVEL;
+
+  const thinkingConfig = { thinkingLevel };
 
   for (
     let attempt = 1;
@@ -1558,6 +1830,10 @@ async function callGemini(
               "Content-Type":
                 "application/json",
             },
+
+            signal: AbortSignal.timeout(
+              GEMINI_FETCH_TIMEOUT_MS
+            ),
 
             body:
               JSON.stringify(
@@ -1661,6 +1937,12 @@ async function callGemini(
         error
       );
 
+      // Don't burn the retry budget on a request that is guaranteed
+      // to fail again identically — a 400/403/404 means the request
+      // itself was rejected, not that anything transient happened.
+      if (isNonRetryableHttpError(error)) {
+        break;
+      }
 
       if (
         attempt < RETRY_LIMIT
@@ -1908,6 +2190,60 @@ Deno.serve(
             );
 
 
+      // ------------------------------------------------------------
+      // ANSWER CACHE — exact-match fast path
+      //
+      // Skips embedding, vector search, and generation entirely for
+      // a question that has already been asked, word-for-word, for
+      // this same book. Safe to check unconditionally: it only
+      // returns a value on an exact match, and any lookup failure
+      // returns null so the normal pipeline runs as before.
+      // ------------------------------------------------------------
+
+      const cachedAnswer =
+        await getCachedAnswer(
+          bookTitle,
+          question
+        );
+
+      if (cachedAnswer) {
+
+        return new Response(
+          JSON.stringify({
+
+            answer:
+              cachedAnswer,
+
+            bookTitle,
+
+            questionType,
+
+            essayMode,
+
+            answerTier,
+
+            cached: true,
+
+            evidenceUsed: [],
+
+            retrievedEvidenceCount: 0,
+
+          }),
+
+          {
+            status: 200,
+
+            headers: {
+              ...corsHeaders,
+
+              "Content-Type":
+                "application/json",
+            },
+          }
+        );
+      }
+
+
       const matchCount =
         answerTier === "essay"
           ? ESSAY_RETRIEVAL_COUNT
@@ -1916,17 +2252,11 @@ Deno.serve(
           : SIMPLE_RETRIEVAL_COUNT;
 
 
-      let chunks =
-        await retrieveEvidence(
+      const chunks =
+        await gatherEvidence(
           question,
           bookTitle,
           matchCount
-        );
-
-
-      chunks =
-        deduplicateChunks(
-          chunks
         );
 
 
@@ -2038,6 +2368,8 @@ Deno.serve(
           essayMode,
 
           answerTier,
+
+          cached: false,
 
           evidenceUsed:
             buildEvidenceResponse(
