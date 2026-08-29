@@ -13,7 +13,7 @@
 //        ↓
 // RELEVANT SETBOOK EVIDENCE
 //        ↓
-// GEMINI 3.7 FLASH (Interactions API)
+// GEMINI 3.7 FLASH (generateContent API)
 //        ↓
 // QUESTION-SPECIFIC KCSE RESPONSE
 //
@@ -67,6 +67,40 @@
 //    type (list, one-mark, definition, analysis, discussion,
 //    etc.) is explicitly covered by the normal-mode prompt, not
 //    just essays.
+//
+// 4. STILL SLOW — the real remaining cause: this function was
+//    calling Gemini's Interactions API (/v1beta/interactions),
+//    which is built for multi-step agent workflows (typed
+//    execution steps, server-side session state, tool
+//    orchestration). Google's own docs recommend the plain
+//    generateContent API instead for "single-shot generation,
+//    latency-sensitive production workloads" — that agent-loop
+//    machinery was overhead this app never needed for a one-shot
+//    Q&A call. Switched to
+//    /v1beta/models/{model}:generateContent, same model, same
+//    prompts, same essay JSON output (now via
+//    generationConfig.responseSchema instead of a custom
+//    response_format wrapper).
+//
+// 5. BALANCING SPEED AND ACCURACY — fully disabling thinking for
+//    every non-essay question (an earlier version of this file)
+//    was too aggressive: a "discuss how the writer uses X" question
+//    genuinely needs a reasoning pass, and skipping it risked
+//    sloppy answers on exactly the questions that need care most.
+//    There are now THREE tiers, chosen per question
+//    (determineAnswerTier, in the QUESTION TYPE DETECTION section):
+//
+//    - SIMPLE: pure recall/list/identify questions, or ANY question
+//      explicitly worth 1-2 marks regardless of type. Thinking
+//      fully off (thinkingBudget: 0), smallest evidence set (6
+//      chunks), smallest token ceiling. Nothing to reason about, so
+//      this costs no accuracy.
+//    - ANALYTICAL: theme/character/discussion/comparison/etc. above
+//      2 marks. A light thinking pass (thinkingLevel "low"), more
+//      evidence (10 chunks). This is where accuracy actually
+//      depends on the model being allowed to think a little.
+//    - ESSAY: unchanged from before — light thinking, 14 chunks,
+//      the full four-body-paragraph structure.
 //
 // ================================================================
 //
@@ -158,20 +192,52 @@ const RETRY_LIMIT = 2;
 // character/theme/style analysis, discussion, passage questions,
 // etc.) are the vast majority of traffic and should feel instant.
 // Essays are rarer and genuinely need more evidence, more room to
-// write, and a bit more thinking — but even they don't need
-// "high" thinking or a 64k token ceiling; that was pure latency
-// with no quality benefit, since a KCSE essay tops out at a few
-// hundred words.
+// write, and more thinking — but even they don't need a 64k token
+// ceiling; that was pure latency with no quality benefit, since a
+// KCSE essay tops out at a few hundred words.
+//
+// THREE TIERS, not two — this is the balance between speed and
+// accuracy:
+//
+// - SIMPLE: pure recall (name/list/identify a setting, character,
+//   etc.) or anything worth 1-2 marks regardless of type. These
+//   have one correct-ish answer sitting directly in the evidence.
+//   No reasoning pass needed — thinking fully off, small evidence
+//   set, tiny token ceiling. Fastest tier, and disabling thinking
+//   here costs essentially nothing in accuracy because there's
+//   nothing to reason about.
+//
+// - ANALYTICAL: theme, character analysis, discussion, comparison,
+//   explanation, symbolism, irony, style/technique, passage
+//   analysis — anything where the model has to connect evidence to
+//   an argument. This is where thinkingBudget: 0 was a real
+//   accuracy risk: skipping the reasoning pass on a "discuss how
+//   the writer uses X" question is exactly where a fast-but-sloppy
+//   answer costs marks. These now get a light thinking pass
+//   (thinkingLevel "low") and more evidence than SIMPLE, while
+//   staying far lighter than ESSAY.
+//
+// - ESSAY: full four-body-paragraph essays. Highest stakes, lowest
+//   frequency — worth spending a bit more thinking and evidence on.
 // ----------------------------------------------------------------
 
-const NORMAL_RETRIEVAL_COUNT = 8;
+const SIMPLE_RETRIEVAL_COUNT = 6;
+const ANALYTICAL_RETRIEVAL_COUNT = 10;
 const ESSAY_RETRIEVAL_COUNT = 14;
 
-const NORMAL_THINKING_LEVEL = "low";
-const ESSAY_THINKING_LEVEL = "medium";
+const ANALYTICAL_THINKING_LEVEL = "low";
+const ESSAY_THINKING_LEVEL = "low";
 
-const NORMAL_MAX_OUTPUT_TOKENS = 2048;
+const SIMPLE_MAX_OUTPUT_TOKENS = 1024;
+const ANALYTICAL_MAX_OUTPUT_TOKENS = 2048;
 const ESSAY_MAX_OUTPUT_TOKENS = 4096;
+
+// Question types that are pure recall/identification — no analysis
+// required, so no thinking pass needed even at full mark value.
+const SIMPLE_QUESTION_TYPES = new Set([
+  "list_or_identification",
+  "setting",
+]);
 
 
 // ================================================================
@@ -399,6 +465,52 @@ function detectQuestionType(
   }
 
   return "general_literature_question";
+}
+
+
+// ================================================================
+// DETERMINE ANSWER TIER (simple / analytical / essay)
+// ================================================================
+//
+// This is the speed/accuracy dial. Essay is decided earlier via
+// isEssayRequest() and handled as its own branch throughout: this
+// function only chooses between SIMPLE and ANALYTICAL for
+// everything else.
+//
+// Rule: marks win over type. A question explicitly worth 1-2 marks
+// gets the fast/simple treatment regardless of its detected type,
+// because even a "character" or "theme" question at 1-2 marks is
+// really just asking for a short, direct fact. Anything without an
+// explicit low mark value defaults to ANALYTICAL unless its type is
+// known pure-recall — erring toward giving the model a reasoning
+// pass rather than risking a sloppy fast answer on something that
+// actually needs analysis.
+//
+// ================================================================
+
+type AnswerTier = "simple" | "analytical";
+
+function determineAnswerTier(
+  questionType: string,
+  marks: number | null
+): AnswerTier {
+
+  if (
+    marks !== null &&
+    marks <= 2
+  ) {
+    return "simple";
+  }
+
+  if (
+    SIMPLE_QUESTION_TYPES.has(
+      questionType
+    )
+  ) {
+    return "simple";
+  }
+
+  return "analytical";
 }
 
 
@@ -968,71 +1080,63 @@ response before returning it — do not stop mid-answer.
 // ESSAY JSON SCHEMA
 // ================================================================
 //
-// The Interactions API expects response_format as a single
-// object (not an array) shaped like:
-// { type: "text", mime_type: "application/json", schema: {...} }
+// generateContent takes this directly as generationConfig.
+// responseSchema (paired with responseMimeType:
+// "application/json") — a plain OpenAPI-subset schema, no
+// wrapper object needed.
 //
 // ================================================================
 
-const ESSAY_RESPONSE_FORMAT = {
-  type: "text",
+const ESSAY_RESPONSE_SCHEMA = {
+  type: "object",
 
-  mime_type:
-    "application/json",
+  properties: {
 
-  schema: {
-    type: "object",
-
-    properties: {
-
-      introduction: {
-        type: "string",
-        description:
-          "A complete KCSE essay introduction that directly answers the question. Plain text, no markdown."
-      },
-
-      body1: {
-        type: "string",
-        description:
-          "The first body paragraph. Exactly one main point, followed by evidence, explanation and significance. Plain text, no markdown."
-      },
-
-      body2: {
-        type: "string",
-        description:
-          "The second body paragraph. A distinct main point, followed by evidence, explanation and significance. Plain text, no markdown."
-      },
-
-      body3: {
-        type: "string",
-        description:
-          "The third body paragraph. A distinct main point, followed by evidence, explanation and significance. Plain text, no markdown."
-      },
-
-      body4: {
-        type: "string",
-        description:
-          "The fourth body paragraph. A distinct main point, followed by evidence, explanation and significance. Plain text, no markdown."
-      },
-
-      conclusion: {
-        type: "string",
-        description:
-          "A separate KCSE essay conclusion that summarises the argument and directly answers the question. Plain text, no markdown."
-      }
+    introduction: {
+      type: "string",
+      description:
+        "A complete KCSE essay introduction that directly answers the question. Plain text, no markdown."
     },
 
-    required: [
-      "introduction",
-      "body1",
-      "body2",
-      "body3",
-      "body4",
-      "conclusion"
-    ],
+    body1: {
+      type: "string",
+      description:
+        "The first body paragraph. Exactly one main point, followed by evidence, explanation and significance. Plain text, no markdown."
+    },
 
-    additionalProperties: false
-  }
+    body2: {
+      type: "string",
+      description:
+        "The second body paragraph. A distinct main point, followed by evidence, explanation and significance. Plain text, no markdown."
+    },
+
+    body3: {
+      type: "string",
+      description:
+        "The third body paragraph. A distinct main point, followed by evidence, explanation and significance. Plain text, no markdown."
+    },
+
+    body4: {
+      type: "string",
+      description:
+        "The fourth body paragraph. A distinct main point, followed by evidence, explanation and significance. Plain text, no markdown."
+    },
+
+    conclusion: {
+      type: "string",
+      description:
+        "A separate KCSE essay conclusion that summarises the argument and directly answers the question. Plain text, no markdown."
+    }
+  },
+
+  required: [
+    "introduction",
+    "body1",
+    "body2",
+    "body3",
+    "body4",
+    "conclusion"
+  ]
 };
 
 
@@ -1107,55 +1211,60 @@ the conclusion. Return the COMPLETE six-part structure.
 
 
 // ================================================================
-// EXTRACT TEXT FROM GEMINI INTERACTION
+// EXTRACT TEXT FROM A generateContent RESPONSE
+// ================================================================
+//
+// generateContent returns:
+// { candidates: [ { content: { parts: [ { text: "..." } ] },
+//                    finishReason: "STOP" | "MAX_TOKENS" | ... } ] }
+//
 // ================================================================
 
 function extractGeminiText(
   data: any
 ): string {
 
+  const candidate =
+    Array.isArray(data?.candidates)
+      ? data.candidates[0]
+      : null;
+
+  const parts =
+    candidate?.content?.parts;
+
+  if (!Array.isArray(parts)) {
+    return "";
+  }
+
   const textParts: string[] = [];
 
-  if (
-    Array.isArray(data?.steps)
-  ) {
+  for (const part of parts) {
 
-    for (
-      const step of data.steps
+    if (
+      typeof part?.text === "string"
     ) {
-
-      if (
-        step?.type !== "model_output"
-      ) {
-        continue;
-      }
-
-      if (
-        !Array.isArray(step?.content)
-      ) {
-        continue;
-      }
-
-      for (
-        const content of step.content
-      ) {
-
-        if (
-          content?.type === "text" &&
-          typeof content?.text === "string"
-        ) {
-
-          textParts.push(
-            content.text
-          );
-        }
-      }
+      textParts.push(part.text);
     }
   }
 
   return textParts
     .join("\n")
     .trim();
+}
+
+
+function getFinishReason(
+  data: any
+): string | null {
+
+  const candidate =
+    Array.isArray(data?.candidates)
+      ? data.candidates[0]
+      : null;
+
+  return typeof candidate?.finishReason === "string"
+    ? candidate.finishReason
+    : null;
 }
 
 
@@ -1344,25 +1453,53 @@ function assembleEssay(
 async function callGemini(
   systemPrompt: string,
   userPrompt: string,
-  essayMode: boolean
+  mode: AnswerTier | "essay"
 ): Promise<{
   answer: string;
-  interactionId: string | null;
   status: string | null;
 }> {
+
+  const essayMode = mode === "essay";
 
   let lastError:
     unknown = null;
 
-  const thinkingLevel =
-    essayMode
-      ? ESSAY_THINKING_LEVEL
-      : NORMAL_THINKING_LEVEL;
-
   const maxOutputTokens =
-    essayMode
+    mode === "essay"
       ? ESSAY_MAX_OUTPUT_TOKENS
-      : NORMAL_MAX_OUTPUT_TOKENS;
+      : mode === "analytical"
+      ? ANALYTICAL_MAX_OUTPUT_TOKENS
+      : SIMPLE_MAX_OUTPUT_TOKENS;
+
+  // ----------------------------------------------------------------
+  // THINKING — the speed/accuracy dial
+  //
+  // SIMPLE (pure recall, or any 1-2 mark question): thinking fully
+  // disabled. Nothing to reason about, so skipping the reasoning
+  // pass costs no accuracy and buys real speed.
+  //
+  // ANALYTICAL (theme/character/discussion/comparison/etc. above
+  // 2 marks): a light thinking pass. This is the tier that was
+  // getting thinkingBudget: 0 before — that was too aggressive,
+  // since these questions genuinely require connecting evidence to
+  // an argument. "low" gives the model room to actually think
+  // without paying "high"-level latency.
+  //
+  // ESSAY: same light thinking level — four non-repeating,
+  // evidence-backed arguments benefit from it, but essays already
+  // get more evidence and more output tokens, so thinking stays
+  // modest rather than "high".
+  //
+  // thinking_level and thinking_budget cannot both be set in the
+  // same request, so exactly one of these two keys is included.
+  // ----------------------------------------------------------------
+
+  const thinkingConfig =
+    mode === "simple"
+      ? { thinkingBudget: 0 }
+      : mode === "analytical"
+      ? { thinkingLevel: ANALYTICAL_THINKING_LEVEL }
+      : { thinkingLevel: ESSAY_THINKING_LEVEL };
 
   for (
     let attempt = 1;
@@ -1374,39 +1511,43 @@ async function callGemini(
 
       const requestBody: any = {
 
-        model:
-          GEMINI_MODEL,
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: userPrompt },
+            ],
+          },
+        ],
 
-        system_instruction:
-          systemPrompt,
-
-        input:
-          userPrompt,
-
-        generation_config: {
-
-          thinking_level:
-            thinkingLevel,
-
-          max_output_tokens:
-            maxOutputTokens,
+        systemInstruction: {
+          parts: [
+            { text: systemPrompt },
+          ],
         },
 
-        store:
-          false,
+        generationConfig: {
+
+          thinkingConfig,
+
+          maxOutputTokens,
+
+          ...(essayMode
+            ? {
+                responseMimeType:
+                  "application/json",
+
+                responseSchema:
+                  ESSAY_RESPONSE_SCHEMA,
+              }
+            : {}),
+        },
       };
-
-
-      if (essayMode) {
-
-        requestBody.response_format =
-          ESSAY_RESPONSE_FORMAT;
-      }
 
 
       const response =
         await fetch(
-          "https://generativelanguage.googleapis.com/v1beta/interactions",
+          `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
           {
             method: "POST",
 
@@ -1416,9 +1557,6 @@ async function callGemini(
 
               "Content-Type":
                 "application/json",
-
-              "Api-Revision":
-                "2026-05-20",
             },
 
             body:
@@ -1444,16 +1582,8 @@ async function callGemini(
         await response.json();
 
 
-      const status =
-        typeof data?.status === "string"
-          ? data.status
-          : null;
-
-
-      const interactionId =
-        typeof data?.id === "string"
-          ? data.id
-          : null;
+      const finishReason =
+        getFinishReason(data);
 
 
       const rawAnswer =
@@ -1463,7 +1593,7 @@ async function callGemini(
       if (!rawAnswer) {
 
         throw new Error(
-          "Gemini returned no text output."
+          `Gemini returned no text output (finishReason: ${finishReason ?? "unknown"}).`
         );
       }
 
@@ -1492,9 +1622,8 @@ async function callGemini(
           answer:
             finalEssay,
 
-          interactionId,
-
-          status,
+          status:
+            finishReason,
         };
       }
 
@@ -1504,11 +1633,12 @@ async function callGemini(
       // ----------------------------------------------------------
 
       if (
-        status === "incomplete"
+        finishReason === "MAX_TOKENS" &&
+        rawAnswer.trim().length < 20
       ) {
 
         throw new Error(
-          "Gemini returned an incomplete answer."
+          "Gemini returned an incomplete answer (hit token limit too early)."
         );
       }
 
@@ -1517,9 +1647,8 @@ async function callGemini(
         answer:
           stripMarkdown(rawAnswer),
 
-        interactionId,
-
-        status,
+        status:
+          finishReason,
       };
 
     } catch (error) {
@@ -1767,10 +1896,24 @@ Deno.serve(
         );
 
 
-      const matchCount =
+      // "simple" | "analytical" | "essay" — the speed/accuracy
+      // tier for this specific question. Essay is decided first
+      // since it overrides everything else.
+      const answerTier =
         essayMode
+          ? ("essay" as const)
+          : determineAnswerTier(
+              questionType,
+              marks
+            );
+
+
+      const matchCount =
+        answerTier === "essay"
           ? ESSAY_RETRIEVAL_COUNT
-          : NORMAL_RETRIEVAL_COUNT;
+          : answerTier === "analytical"
+          ? ANALYTICAL_RETRIEVAL_COUNT
+          : SIMPLE_RETRIEVAL_COUNT;
 
 
       let chunks =
@@ -1843,7 +1986,7 @@ Deno.serve(
         await callGemini(
           systemPrompt,
           userPrompt,
-          essayMode
+          answerTier
         );
 
 
@@ -1893,6 +2036,8 @@ Deno.serve(
           questionType,
 
           essayMode,
+
+          answerTier,
 
           evidenceUsed:
             buildEvidenceResponse(
