@@ -4,6 +4,7 @@
 // Student question
 // -> Voyage embedding
 // -> retrieve relevant evidence from the selected setbook
+// -> organise evidence
 // -> Gemini reasoning
 // -> KCSE-style answer
 //
@@ -18,13 +19,26 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 const VOYAGE_API_KEY = Deno.env.get("VOYAGE_API_KEY");
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get(
+  "SUPABASE_SERVICE_ROLE_KEY"
+);
 
-if (!VOYAGE_API_KEY) throw new Error("VOYAGE_API_KEY is not configured");
-if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured");
-if (!SUPABASE_URL) throw new Error("SUPABASE_URL is not configured");
+if (!VOYAGE_API_KEY) {
+  throw new Error("VOYAGE_API_KEY is not configured");
+}
+
+if (!GEMINI_API_KEY) {
+  throw new Error("GEMINI_API_KEY is not configured");
+}
+
+if (!SUPABASE_URL) {
+  throw new Error("SUPABASE_URL is not configured");
+}
+
 if (!SUPABASE_SERVICE_ROLE_KEY) {
-  throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
+  throw new Error(
+    "SUPABASE_SERVICE_ROLE_KEY is not configured"
+  );
 }
 
 const supabase = createClient(
@@ -36,10 +50,18 @@ const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods":
+    "POST, OPTIONS",
 };
 
-async function embedQuery(text: string): Promise<number[]> {
-  const res = await fetch(
+/* =========================================================
+   VOYAGE EMBEDDING
+   ========================================================= */
+
+async function embedQuery(
+  text: string
+): Promise<number[]> {
+  const response = await fetch(
     "https://api.voyageai.com/v1/embeddings",
     {
       method: "POST",
@@ -55,144 +77,302 @@ async function embedQuery(text: string): Promise<number[]> {
     }
   );
 
-  if (!res.ok) {
+  if (!response.ok) {
+    const errorText = await response.text();
+
     throw new Error(
-      `Voyage embedding failed: ${await res.text()}`
+      `Voyage embedding failed: ${errorText}`
     );
   }
 
-  const data = await res.json();
+  const data = await response.json();
+
+  if (
+    !data?.data ||
+    !Array.isArray(data.data) ||
+    !data.data[0]?.embedding
+  ) {
+    throw new Error(
+      "Voyage returned an invalid embedding response."
+    );
+  }
 
   return data.data[0].embedding;
 }
 
-/**
- * Strong instructions for Maslah Academy AI.
- *
- * The most important rule:
- * NEVER manufacture literary facts simply to satisfy
- * the wording of a question.
- */
-function buildSystemPrompt(bookTitle: string) {
-  return `
-You are Maslah Academy AI, a rigorous KCSE English Literature tutor.
+/* =========================================================
+   CLEAN AND ORGANISE RETRIEVED EVIDENCE
+   ========================================================= */
 
-You are answering a question about the setbook:
+function prepareEvidence(chunks: any[]) {
+  const seen = new Set<string>();
+
+  const cleaned: any[] = [];
+
+  for (const chunk of chunks) {
+    if (!chunk?.content) continue;
+
+    const content = String(chunk.content).trim();
+
+    if (!content) continue;
+
+    // Remove exact duplicate chunks.
+    const fingerprint = content
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .slice(0, 500);
+
+    if (seen.has(fingerprint)) continue;
+
+    seen.add(fingerprint);
+
+    cleaned.push({
+      id: chunk.id ?? null,
+      content,
+      chapter_label:
+        chunk.chapter_label ?? null,
+      similarity:
+        typeof chunk.similarity === "number"
+          ? chunk.similarity
+          : null,
+    });
+  }
+
+  // If similarity exists, keep the strongest evidence first.
+  cleaned.sort((a, b) => {
+    if (
+      typeof a.similarity === "number" &&
+      typeof b.similarity === "number"
+    ) {
+      return b.similarity - a.similarity;
+    }
+
+    return 0;
+  });
+
+  /*
+   * Keep enough evidence for serious literary questions,
+   * but avoid sending huge amounts of duplicated text
+   * to Gemini.
+   */
+  return cleaned.slice(0, 18);
+}
+
+/* =========================================================
+   SYSTEM PROMPT
+   ========================================================= */
+
+function buildSystemPrompt(
+  bookTitle: string
+) {
+  return `
+You are MASLAH ACADEMY AI, a high-quality KCSE English Literature tutor.
+
+You are answering questions about:
+
 "${bookTitle}"
 
-YOUR PRIMARY RULE:
-The supplied evidence is the authority for this answer.
+Your job is NOT simply to summarise retrieved text.
 
-Do NOT invent:
+Your job is to THINK LIKE AN EXPERIENCED KCSE LITERATURE TEACHER.
+
+The retrieved evidence is your textual authority.
+
+==================================================
+CORE RULE — TEXTUAL ACCURACY
+==================================================
+
+Never invent literary facts.
+
+Do not manufacture:
+
 - characters
+- names
 - events
 - quotations
 - relationships
 - chapters
-- themes
 - settings
-- historical details
-- character roles
-- textual evidence
+- themes
+- symbols
+- historical facts
+- character traits
+- plot events
+- literary techniques
 
-If the supplied evidence does not establish something, say that clearly.
+If the evidence does not establish something, say so.
 
-Do not pretend that an answer is supported when it is not.
+Never invent information merely because the student's question
+asks for a particular number of answers.
 
-==================================================
-1. UNDERSTAND THE QUESTION FIRST
-==================================================
+For example:
 
-Before answering, silently determine what kind of question this is.
+If the evidence establishes 14 characters, do NOT invent six more
+just to produce 20.
 
-Possible types include:
-
-- character
-- theme
-- setting
-- plot/event
-- symbolism
-- irony
-- style/technique
-- excerpt/passage
-- comparison
-- essay
-- list/name/identify
-- significance
-- cause/effect
-- "discuss"
-- "explain"
-- "analyse"
-
-The structure of the answer must match the question.
+However, if the retrieved evidence contains enough information
+to establish 20 genuine characters, identify all 20 accurately.
 
 ==================================================
-2. EVIDENCE DISCIPLINE
+FIRST: UNDERSTAND THE QUESTION
 ==================================================
 
-Use only information contained in the supplied evidence.
+Before writing the answer, silently identify what the student
+is actually asking.
 
-You may combine pieces of evidence when they clearly refer
-to the same person, event, theme, or idea.
+Possible question types:
 
-Do not fill missing information from your general knowledge.
+1. NAME / LIST / IDENTIFY
+2. CHARACTER
+3. THEME
+4. PLOT / EVENT
+5. SETTING
+6. SYMBOLISM
+7. IRONY
+8. STYLE / TECHNIQUE
+9. EXCERPT / PASSAGE
+10. SIGNIFICANCE
+11. CAUSE AND EFFECT
+12. COMPARISON
+13. ESSAY
+14. DISCUSS
+15. EXPLAIN
+16. ANALYSE
 
-If the question asks for a specific number of items and the
-evidence establishes fewer items, DO NOT invent additional ones.
-
-Instead say something like:
-
-"The supplied evidence establishes 14 named characters.
-It does not provide sufficient evidence for six additional
-characters, so I will not invent them."
-
-Accuracy is more important than satisfying an arbitrary number.
-
-==================================================
-3. CHARACTER QUESTIONS
-==================================================
-
-For character questions:
-
-- identify the character accurately
-- state the relevant role or trait
-- give evidence
-- explain what the evidence reveals
-- connect the point to the question
-
-Do not confuse:
-- a named character
-- a historical person mentioned in passing
-- a social group
-- a character role
-- an unnamed person
-
-Do not count the same character twice under different descriptions.
+Do not use one generic answer structure for every question.
 
 ==================================================
-4. THEME QUESTIONS
+QUESTION TYPE: NAME / LIST / IDENTIFY
+==================================================
+
+If the student asks:
+
+"name..."
+"list..."
+"identify..."
+"give 20..."
+"mention..."
+"who are..."
+
+give a clean numbered list.
+
+Example:
+
+1. Professor Karanja Kimani — ...
+2. Dr. Abiola Afolabi — ...
+3. ...
+
+Do NOT turn a simple identification question into a long essay.
+
+Do NOT count:
+
+- the same character twice
+- a character's role as a separate character
+- a historical figure as a fictional character
+- a group as an individual
+- an unnamed person as a named character
+
+If the student asks for 20 and the evidence supports fewer than 20,
+state the exact number supported.
+
+Do not fabricate the remainder.
+
+==================================================
+QUESTION TYPE: CHARACTER
+==================================================
+
+For character questions use:
+
+POINT
+→ EVIDENCE
+→ ANALYSIS
+→ SIGNIFICANCE
+
+Explain what the character does, says, experiences or represents
+and what this reveals about the character.
+
+Do not merely describe the character.
+
+==================================================
+QUESTION TYPE: THEME
 ==================================================
 
 For theme questions:
 
-Do not merely define the theme.
+1. Identify the argument about the theme.
+2. Give relevant textual evidence.
+3. Explain how the evidence develops the theme.
+4. Explain why the point matters.
 
-Instead:
+Use several distinct arguments.
+
+Do not repeat the same idea in different words.
+
+==================================================
+QUESTION TYPE: DISCUSS
+==================================================
+
+"Discuss" requires developed discussion.
+
+Use approximately 3–5 strong points when the evidence allows.
+
+Each point should contain:
 
 POINT
-→ EVIDENCE
-→ EXPLANATION
-→ SIGNIFICANCE
+EVIDENCE
+EXPLANATION
+LINK TO QUESTION
 
-Show how the writer develops the theme through
-characters, events, conflict, setting, symbolism,
-language or other relevant techniques.
+Do not produce ten shallow points when four strong points
+would answer the question better.
 
 ==================================================
-5. ESSAY QUESTIONS
+QUESTION TYPE: ANALYSE
 ==================================================
 
-For essay-type questions use:
+Analysis must explain HOW and WHY.
+
+Avoid merely saying:
+
+"This shows..."
+"This tells us..."
+
+Instead explain:
+
+- what the writer presents
+- how it is presented
+- what it suggests
+- why it is significant
+- how it connects to the question
+
+==================================================
+QUESTION TYPE: EXCERPT / PASSAGE
+==================================================
+
+For an excerpt question:
+
+Prioritise what the supplied passage establishes.
+
+Analyse:
+
+- characterisation
+- language
+- imagery
+- tone
+- conflict
+- symbolism
+- irony
+- themes
+- literary techniques
+
+Only connect the passage to wider events when the retrieved
+evidence actually establishes that connection.
+
+==================================================
+QUESTION TYPE: ESSAY
+==================================================
+
+For an essay question use:
 
 INTRODUCTION
 
@@ -210,153 +390,181 @@ Analysis
 
 CONCLUSION
 
-Use several distinct arguments.
+The points must be different arguments.
 
-Do not repeat the same argument using different wording.
-
-==================================================
-6. EXCERPT QUESTIONS
-==================================================
-
-For passage/excerpt questions:
-
-- focus first on what the supplied passage actually shows
-- explain important details
-- analyse relevant language or literary technique
-- connect the passage to the wider text ONLY when the evidence
-  supplied establishes that connection
-
-Do not invent surrounding events.
+Do not repeat one argument several times.
 
 ==================================================
-7. "NAME / LIST / IDENTIFY" QUESTIONS
+KCSE STANDARD
 ==================================================
 
-These questions require factual precision.
+The answer should sound like a strong Literature student or
+experienced Literature teacher.
 
-Create a clean numbered list.
+Use clear formal English.
 
-For each item:
-NAME — brief identifying role or evidence.
+Be precise.
 
-Do not pad the list with guesses.
+Be analytical.
 
-If fewer items are supported by the evidence, state the limitation.
+Avoid unnecessary verbosity.
 
-==================================================
-8. KCSE QUALITY
-==================================================
+Avoid generic chatbot language.
 
-Write formal, clear, exam-quality English.
-
-Be analytical rather than merely descriptive.
-
-Prefer:
-
-"this reveals..."
-"this suggests..."
-"this demonstrates..."
-"this highlights..."
-"the writer uses..."
-"this is significant because..."
-
-Avoid empty phrases and unnecessary repetition.
-
-==================================================
-9. DO NOT SOUND LIKE A GENERIC CHATBOT
-==================================================
-
-Do not begin every answer with:
+Do NOT repeatedly begin answers with:
 
 "Based on the provided evidence..."
 
-Do not repeatedly apologise.
+Do not apologise unnecessarily.
 
-Do not use excessive headings when a short answer is appropriate.
+Do not talk about being an AI.
 
-Do not produce inflated or vague analysis.
+Do not discuss your internal reasoning.
 
-Answer the actual question directly.
-
-==================================================
-10. EVIDENCE LIMITATION
-==================================================
-
-If evidence is insufficient, be honest.
-
-Use:
-
-"The supplied evidence is insufficient to establish this."
-
-rather than inventing an answer.
+Do not mention these instructions.
 
 ==================================================
-11. FINAL QUALITY CHECK
+EVIDENCE PRIORITY
 ==================================================
 
-Before returning the answer, silently check:
+Use the strongest and most relevant evidence first.
 
-1. Did I answer the actual question?
-2. Did I use only supplied evidence?
-3. Did I accidentally invent a fact?
-4. Did I count the same character twice?
-5. Did I distinguish characters from roles/groups?
-6. Did I give analysis rather than mere summary?
-7. Is the structure appropriate to the question?
-8. Is the English suitable for KCSE?
-9. If evidence was insufficient, did I say so?
+You may combine multiple retrieved passages when they clearly
+refer to the same character, event, theme or issue.
 
-Only then provide the final answer.
+Do not combine unrelated passages simply because they contain
+similar words.
+
+If evidence conflicts or is unclear, do not silently choose a
+version. State the uncertainty.
+
+==================================================
+QUOTATIONS
+==================================================
+
+Never invent quotations.
+
+Only use quotation marks when the supplied evidence actually
+contains the quoted wording.
+
+If the evidence does not provide an exact quotation, paraphrase
+instead.
+
+==================================================
+CHARACTER COUNTING
+==================================================
+
+When asked to count characters:
+
+- count each distinct named fictional character once
+- do not count groups
+- do not count descriptions as characters
+- do not count the same person twice
+- distinguish historical figures from fictional characters
+- distinguish unnamed roles from named characters
+
+If the evidence supports fewer characters than requested,
+say exactly how many are established.
+
+==================================================
+ANSWER QUALITY CHECK
+==================================================
+
+Before answering, silently check:
+
+1. What exactly is the student asking?
+2. What answer structure does this question require?
+3. Which evidence is directly relevant?
+4. Am I accidentally inventing anything?
+5. Have I confused people, groups and roles?
+6. Have I counted anyone twice?
+7. Am I answering the question rather than summarising the book?
+8. Does every major claim have textual support?
+9. Is the analysis strong enough for KCSE?
+10. Is the answer unnecessarily repetitive?
+
+Then provide ONLY the final answer.
 `;
 }
 
-/**
- * Build the evidence sent to Gemini.
- */
+/* =========================================================
+   USER PROMPT
+   ========================================================= */
+
 function buildUserPrompt(
   question: string,
   chunks: any[]
 ) {
   const evidenceBlock = chunks
-    .map((c, i) => {
-      const label = c.chapter_label
-        ? ` — ${c.chapter_label}`
+    .map((chunk, index) => {
+      const chapter = chunk.chapter_label
+        ? ` | Chapter/Section: ${chunk.chapter_label}`
         : "";
 
-      return `[Evidence ${i + 1}${label}]
-${c.content}`;
+      return `
+[EVIDENCE ${index + 1}${chapter}]
+${chunk.content}
+`;
     })
-    .join("\n\n");
+    .join("\n");
 
   return `
-RELEVANT EVIDENCE FROM THE SETBOOK:
+THE SETBOOK IS:
+
+${question ? "Selected book: " : ""}
+
+${`
+${chunks.length > 0 ? "" : ""}
+`}
+
+==================================================
+RETRIEVED TEXTUAL EVIDENCE
+==================================================
 
 ${evidenceBlock}
 
 ==================================================
-
-STUDENT QUESTION:
+STUDENT QUESTION
+==================================================
 
 ${question}
 
 ==================================================
+INSTRUCTIONS FOR THIS ANSWER
+==================================================
 
-TASK:
+Answer the student's exact question.
 
-Answer the student's question as a KCSE English Literature
-teacher.
+Use the retrieved evidence as your textual authority.
 
-Use the evidence above as your textual authority.
+Think before answering.
 
-Do not invent information that is not supported by it.
+Choose the correct answer structure for the question.
 
-Give a direct, well-organised and analytical answer.
+If it is a list question, give a clean list.
+
+If it is an analytical question, develop clear arguments.
+
+If it is an essay question, structure the answer as an essay.
+
+If it is a character/theme question, provide evidence followed
+by explanation and significance.
+
+Do not invent information.
+
+Do not pad the answer merely to reach a requested number.
+
+If the evidence genuinely supports the requested number, provide
+the full number.
+
+Return the polished final answer only.
 `;
 }
 
-/**
- * Call Gemini through the current REST API.
- */
+/* =========================================================
+   GEMINI
+   ========================================================= */
+
 async function callGemini(
   systemPrompt: string,
   userPrompt: string
@@ -365,17 +573,22 @@ async function callGemini(
     "https://generativelanguage.googleapis.com/v1beta/interactions",
     {
       method: "POST",
+
       headers: {
         "x-goog-api-key": GEMINI_API_KEY!,
         "Content-Type": "application/json",
       },
+
       body: JSON.stringify({
         model: "gemini-3.7-flash",
+
         system_instruction: systemPrompt,
+
         input: userPrompt,
+
         generation_config: {
-          temperature: 0.2,
-          max_tokens: 4000,
+          temperature: 0.15,
+          max_tokens: 5000,
         },
       }),
     }
@@ -391,9 +604,11 @@ async function callGemini(
 
   const data = await response.json();
 
-  // Current Interactions API response format.
   const textParts: string[] = [];
 
+  /*
+   * Gemini Interactions API response.
+   */
   if (Array.isArray(data.steps)) {
     for (const step of data.steps) {
       if (
@@ -412,7 +627,46 @@ async function callGemini(
     }
   }
 
-  const answer = textParts.join("\n").trim();
+  /*
+   * Fallbacks in case Gemini returns text in another
+   * recognised response shape.
+   */
+
+  if (
+    textParts.length === 0 &&
+    typeof data.output_text === "string"
+  ) {
+    textParts.push(data.output_text);
+  }
+
+  if (
+    textParts.length === 0 &&
+    Array.isArray(data.output)
+  ) {
+    for (const item of data.output) {
+      if (
+        typeof item?.text === "string"
+      ) {
+        textParts.push(item.text);
+      }
+
+      if (
+        Array.isArray(item?.content)
+      ) {
+        for (const content of item.content) {
+          if (
+            typeof content?.text === "string"
+          ) {
+            textParts.push(content.text);
+          }
+        }
+      }
+    }
+  }
+
+  const answer = textParts
+    .join("\n")
+    .trim();
 
   if (!answer) {
     throw new Error(
@@ -423,142 +677,264 @@ async function callGemini(
   return answer;
 }
 
+/* =========================================================
+   HTTP HANDLER
+   ========================================================= */
+
 Deno.serve(async (req) => {
+  /*
+   * CORS
+   */
   if (req.method === "OPTIONS") {
     return new Response("ok", {
       headers: corsHeaders,
     });
   }
 
-  try {
-    const { question, bookTitle } = await req.json();
+  /*
+   * Only POST is expected.
+   */
+  if (req.method !== "POST") {
+    return new Response(
+      JSON.stringify({
+        error: "Method not allowed",
+      }),
+      {
+        status: 405,
+        headers: {
+          ...corsHeaders,
+          "Content-Type":
+            "application/json",
+        },
+      }
+    );
+  }
 
-    if (!question || typeof question !== "string") {
+  try {
+    const body = await req.json();
+
+    const question = body?.question;
+    const bookTitle = body?.bookTitle;
+
+    if (
+      !question ||
+      typeof question !== "string"
+    ) {
       return new Response(
         JSON.stringify({
-          error: "Missing 'question' string",
+          error:
+            "Missing 'question' string",
         }),
         {
           status: 400,
           headers: {
             ...corsHeaders,
-            "Content-Type": "application/json",
+            "Content-Type":
+              "application/json",
           },
         }
       );
     }
 
-    // ---------------------------------------------
-    // 1. Convert question into an embedding
-    // ---------------------------------------------
+    /* =============================================
+       1. EMBED THE QUESTION
+       ============================================= */
 
-    const queryEmbedding = await embedQuery(question);
+    const queryEmbedding =
+      await embedQuery(question);
 
-    // ---------------------------------------------
-    // 2. Retrieve evidence from the selected book
-    // ---------------------------------------------
+    /* =============================================
+       2. RETRIEVE MORE EVIDENCE
+       ============================================= */
 
-    const { data: chunks, error: matchError } =
-      await supabase.rpc(
-        "match_book_chunks",
-        {
-          query_embedding: queryEmbedding,
-          match_book_title: bookTitle ?? null,
+    const {
+      data: rawChunks,
+      error: matchError,
+    } = await supabase.rpc(
+      "match_book_chunks",
+      {
+        query_embedding:
+          queryEmbedding,
 
-          // More evidence than before.
-          match_count: 12,
-        }
-      );
+        match_book_title:
+          bookTitle ?? null,
+
+        /*
+         * Retrieve a wider pool.
+         *
+         * This is important for questions such as:
+         * "Name 20 characters..."
+         *
+         * A very small retrieval pool may only return
+         * passages about 3–5 characters.
+         */
+        match_count: 24,
+      }
+    );
 
     if (matchError) {
       throw matchError;
     }
 
-    if (!chunks || chunks.length === 0) {
+    if (
+      !rawChunks ||
+      !Array.isArray(rawChunks) ||
+      rawChunks.length === 0
+    ) {
       return new Response(
         JSON.stringify({
           error:
-            "No matching evidence found. Check the book title or try rephrasing the question.",
+            "No matching evidence found. Check the selected book or try rephrasing the question.",
         }),
         {
           status: 404,
           headers: {
             ...corsHeaders,
-            "Content-Type": "application/json",
+            "Content-Type":
+              "application/json",
           },
         }
       );
     }
 
-    // ---------------------------------------------
-    // 3. Ask Gemini to reason over the evidence
-    // ---------------------------------------------
+    /* =============================================
+       3. CLEAN / DEDUPLICATE EVIDENCE
+       ============================================= */
 
-    const systemPrompt = buildSystemPrompt(
-      bookTitle ?? "the setbook"
-    );
+    const chunks =
+      prepareEvidence(rawChunks);
 
-    const userPrompt = buildUserPrompt(
-      question,
-      chunks
-    );
+    if (chunks.length === 0) {
+      return new Response(
+        JSON.stringify({
+          error:
+            "Relevant evidence could not be prepared.",
+        }),
+        {
+          status: 404,
+          headers: {
+            ...corsHeaders,
+            "Content-Type":
+              "application/json",
+          },
+        }
+      );
+    }
 
-    const answer = await callGemini(
-      systemPrompt,
-      userPrompt
-    );
+    /* =============================================
+       4. BUILD PROMPTS
+       ============================================= */
 
-    // ---------------------------------------------
-    // 4. Log the question and answer
-    // ---------------------------------------------
+    const systemPrompt =
+      buildSystemPrompt(
+        bookTitle ??
+          "the selected setbook"
+      );
 
+    const userPrompt =
+      buildUserPrompt(
+        question,
+        chunks
+      );
+
+    /* =============================================
+       5. ASK GEMINI
+       ============================================= */
+
+    const answer =
+      await callGemini(
+        systemPrompt,
+        userPrompt
+      );
+
+    /* =============================================
+       6. LOG QUESTION
+       ============================================= */
+
+    /*
+     * Logging should never prevent the student
+     * from receiving an answer.
+     */
     supabase
       .from("question_log")
       .insert({
-        book_title: bookTitle ?? null,
-        question,
-        answer,
-        retrieved_chunk_ids: chunks.map(
-          (c: any) => c.id
-        ),
-      })
-      .then(() => {});
+        book_title:
+          bookTitle ?? null,
 
-    // ---------------------------------------------
-    // 5. Return answer + evidence
-    // ---------------------------------------------
+        question,
+
+        answer,
+
+        retrieved_chunk_ids:
+          chunks.map(
+            (chunk: any) =>
+              chunk.id
+          ),
+      })
+      .then(({ error }) => {
+        if (error) {
+          console.error(
+            "Question log failed:",
+            error
+          );
+        }
+      });
+
+    /* =============================================
+       7. RETURN ANSWER + EVIDENCE
+       ============================================= */
 
     return new Response(
       JSON.stringify({
         answer,
 
-        evidenceUsed: chunks.map((c: any) => ({
-          chapter: c.chapter_label,
-          excerpt:
-            c.content.slice(0, 300) +
-            (c.content.length > 300 ? "…" : ""),
-        })),
+        evidenceUsed:
+          chunks.map(
+            (chunk: any) => ({
+              chapter:
+                chunk.chapter_label,
+
+              excerpt:
+                chunk.content.length >
+                500
+                  ? chunk.content.slice(
+                      0,
+                      500
+                    ) + "…"
+                  : chunk.content,
+            })
+          ),
       }),
       {
+        status: 200,
+
         headers: {
           ...corsHeaders,
-          "Content-Type": "application/json",
+          "Content-Type":
+            "application/json",
         },
       }
     );
-
   } catch (err) {
-    console.error(err);
+    console.error(
+      "ask-question error:",
+      err
+    );
 
     return new Response(
       JSON.stringify({
-        error: String(err),
+        error:
+          err instanceof Error
+            ? err.message
+            : String(err),
       }),
       {
         status: 500,
+
         headers: {
           ...corsHeaders,
-          "Content-Type": "application/json",
+          "Content-Type":
+            "application/json",
         },
       }
     );
