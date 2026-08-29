@@ -1,78 +1,60 @@
-// ============================================================
-// MASLAH ACADEMY AI
-// ask-question Edge Function
-//
-// FINAL PRODUCTION VERSION
+// ================================================================
+// MASLAH ACADEMY AI — ASK QUESTION EDGE FUNCTION
+// ================================================================
 //
 // Pipeline:
 //
 // Student question
-//        ↓
-// Validate request
-//        ↓
-// Identify question type
-//        ↓
-// Voyage query embedding
-//        ↓
-// Supabase semantic retrieval
-//        ↓
-// Evidence selection by Gemini
-//        ↓
-// KCSE answer generation
-//        ↓
-// Structured-output validation
-//        ↓
-// Essay structure validation / repair when required
-//        ↓
-// Log question + answer
-//        ↓
-// Return answer + evidence
+//       ↓
+// Voyage AI embedding
+//       ↓
+// Semantic retrieval from selected setbook
+//       ↓
+// Evidence filtering / preparation
+//       ↓
+// Gemini reasoning
+//       ↓
+// KCSE-style answer
+//       ↓
+// Complete answer + evidence returned to frontend
 //
-// Required Supabase secrets:
+// REQUIRED SUPABASE SECRETS:
 //
 // VOYAGE_API_KEY
 // GEMINI_API_KEY
 // SUPABASE_URL
 // SUPABASE_SERVICE_ROLE_KEY
 //
-// ============================================================
+// IMPORTANT:
+// This function is designed to be evidence-first.
+// It must NOT invent literary facts simply because a question
+// asks for a certain number of characters, points, examples, etc.
+//
+// ================================================================
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 
-// ============================================================
+// ================================================================
 // ENVIRONMENT
-// ============================================================
+// ================================================================
 
-const VOYAGE_API_KEY =
-  Deno.env.get("VOYAGE_API_KEY");
-
-const GEMINI_API_KEY =
-  Deno.env.get("GEMINI_API_KEY");
-
-const SUPABASE_URL =
-  Deno.env.get("SUPABASE_URL");
-
-const SUPABASE_SERVICE_ROLE_KEY =
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
-// Fail immediately if required configuration is missing.
+const VOYAGE_API_KEY = Deno.env.get("VOYAGE_API_KEY");
+const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get(
+  "SUPABASE_SERVICE_ROLE_KEY"
+);
 
 if (!VOYAGE_API_KEY) {
-  throw new Error(
-    "VOYAGE_API_KEY is not configured"
-  );
+  throw new Error("VOYAGE_API_KEY is not configured");
 }
 
 if (!GEMINI_API_KEY) {
-  throw new Error(
-    "GEMINI_API_KEY is not configured"
-  );
+  throw new Error("GEMINI_API_KEY is not configured");
 }
 
 if (!SUPABASE_URL) {
-  throw new Error(
-    "SUPABASE_URL is not configured"
-  );
+  throw new Error("SUPABASE_URL is not configured");
 }
 
 if (!SUPABASE_SERVICE_ROLE_KEY) {
@@ -81,34 +63,18 @@ if (!SUPABASE_SERVICE_ROLE_KEY) {
   );
 }
 
-// ============================================================
+// ================================================================
 // SUPABASE CLIENT
-// ============================================================
+// ================================================================
 
 const supabase = createClient(
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY
 );
 
-// ============================================================
-// CONSTANTS
-// ============================================================
-
-const GEMINI_MODEL =
-  "gemini-3.7-flash";
-
-const VOYAGE_MODEL =
-  "voyage-3";
-
-const MATCH_COUNT = 12;
-
-const GEMINI_MAX_OUTPUT_TOKENS = 8000;
-
-const REQUEST_TIMEOUT_MS = 60_000;
-
-// ============================================================
+// ================================================================
 // CORS
-// ============================================================
+// ================================================================
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -116,358 +82,108 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods":
     "POST, OPTIONS",
-  "Content-Type":
-    "application/json",
 };
 
-// ============================================================
+// ================================================================
+// CONSTANTS
+// ================================================================
+
+const GEMINI_MODEL = "gemini-3.7-flash";
+
+// We deliberately retrieve more evidence than the old version.
+// The model will still be instructed to use only relevant evidence.
+const RETRIEVAL_COUNT = 16;
+
+// Large enough for a proper KCSE essay.
+// The previous code incorrectly used max_tokens.
+// Gemini Interactions API uses max_output_tokens.
+const MAX_OUTPUT_TOKENS = 8000;
+
+// Maximum amount of evidence text sent from each chunk.
+// This prevents one enormous chunk from overwhelming the question.
+const MAX_CHUNK_CHARS = 5000;
+
+// Maximum total evidence supplied to Gemini.
+// This keeps the prompt manageable while still providing substantial
+// textual grounding.
+const MAX_TOTAL_EVIDENCE_CHARS = 50000;
+
+// Number of times we are willing to retry an incomplete Gemini answer.
+const MAX_GEMINI_ATTEMPTS = 2;
+
+// ================================================================
 // TYPES
-// ============================================================
+// ================================================================
 
-type QuestionType =
-  | "essay"
-  | "list"
-  | "comparison"
-  | "theme"
-  | "character"
-  | "literary-technique"
-  | "excerpt"
-  | "explanation"
-  | "general";
-
-interface EvidenceChunk {
-  id: string | number;
-  content: string;
+type BookChunk = {
+  id?: string | number;
+  content?: string;
   chapter_label?: string | null;
-  similarity?: number | null;
+  similarity?: number;
   [key: string]: unknown;
-}
+};
 
-interface StructuredAnswer {
-  question_type: QuestionType;
+// ================================================================
+// UTILITY: SAFE JSON
+// ================================================================
 
-  answer: string;
+async function readJsonSafely(
+  response: Response
+): Promise<any> {
+  const text = await response.text();
 
-  introduction: string;
-
-  body_paragraph_1: string;
-
-  body_paragraph_2: string;
-
-  body_paragraph_3: string;
-
-  body_paragraph_4: string;
-
-  conclusion: string;
-
-  list_items: string[];
-
-  evidence_refs: string[];
-}
-
-// ============================================================
-// SAFE STRING HELPERS
-// ============================================================
-
-function cleanString(
-  value: unknown
-): string {
-  if (typeof value !== "string") {
-    return "";
+  if (!text) {
+    return {};
   }
 
-  return value.trim();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Invalid JSON returned by API: ${text.slice(0, 1000)}`
+    );
+  }
 }
 
-function normalizeText(
-  value: string
-): string {
-  return value
-    .toLowerCase()
-    .replace(/\r/g, "")
-    .replace(/[ \t]+/g, " ")
+// ================================================================
+// UTILITY: CLEAN TEXT
+// ================================================================
+
+function cleanText(text: string): string {
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\u0000/g, "")
     .trim();
 }
 
-function countWords(
-  value: string
-): number {
-  return value
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .length;
-}
-
-// ============================================================
-// BOOK TITLE NORMALISATION
-//
-// This does NOT replace arbitrary titles.
-//
-// It only makes common variations of the two current
-// setbooks consistent.
-//
-// Future books can still pass their own database title.
-// ============================================================
-
-function normalizeBookTitle(
-  title: unknown
-): string | null {
-  if (
-    typeof title !== "string" ||
-    !title.trim()
-  ) {
-    return null;
-  }
-
-  const value =
-    title.trim();
-
-  const lower =
-    value.toLowerCase();
-
-  if (
-    lower === "fathers of nations" ||
-    lower === "father of nations" ||
-    lower === "the fathers of nations"
-  ) {
-    return "Fathers of Nations";
-  }
-
-  if (
-    lower === "the samaritan" ||
-    lower === "samaritan"
-  ) {
-    return "The Samaritan";
-  }
-
-  // Preserve future setbook titles.
-  return value;
-}
-
-// ============================================================
-// QUESTION TYPE DETECTION
-//
-// This is deliberately conservative.
-//
-// "Discuss", "examine", "assess", etc. are treated as essay
-// questions because KCSE literature commonly expects developed
-// essay-style responses for these commands.
-//
-// "Name", "list", "identify" remain list questions.
-// ============================================================
-
-function detectQuestionType(
-  question: string
-): QuestionType {
-  const q =
-    normalizeText(question);
-
-  // ----------------------------------------------------------
-  // LIST / IDENTIFICATION
-  // ----------------------------------------------------------
-
-  if (
-    /^(name|list|identify|mention|state)\b/.test(q) ||
-    /\bname at least\b/.test(q) ||
-    /\blist at least\b/.test(q) ||
-    /\bidentify at least\b/.test(q) ||
-    /\bwho are\b/.test(q)
-  ) {
-    return "list";
-  }
-
-  // ----------------------------------------------------------
-  // ESSAY COMMANDS
-  // ----------------------------------------------------------
-
-  if (
-    /\bdiscuss\b/.test(q) ||
-    /\bexamine\b/.test(q) ||
-    /\bassess\b/.test(q) ||
-    /\bevaluate\b/.test(q) ||
-    /\bto what extent\b/.test(q) ||
-    /\bhow far\b/.test(q) ||
-    /\bdo you agree\b/.test(q) ||
-    /\bjustify\b/.test(q) ||
-    /\billustrate\b/.test(q) ||
-    /\bcritically discuss\b/.test(q) ||
-    /\bcritically examine\b/.test(q) ||
-    /\bwrite an essay\b/.test(q) ||
-    /\bessay on\b/.test(q)
-  ) {
-    return "essay";
-  }
-
-  // ----------------------------------------------------------
-  // COMPARISON
-  // ----------------------------------------------------------
-
-  if (
-    /\bcompare\b/.test(q) ||
-    /\bcontrast\b/.test(q) ||
-    /\bcompare and contrast\b/.test(q) ||
-    /\bsimilarities\b/.test(q) ||
-    /\bdifferences\b/.test(q)
-  ) {
-    return "comparison";
-  }
-
-  // ----------------------------------------------------------
-  // THEME
-  // ----------------------------------------------------------
-
-  if (
-    /\btheme\b/.test(q) ||
-    /\bthemes\b/.test(q) ||
-    /\bthematic\b/.test(q)
-  ) {
-    return "theme";
-  }
-
-  // ----------------------------------------------------------
-  // CHARACTER
-  // ----------------------------------------------------------
-
-  if (
-    /\bcharacter\b/.test(q) ||
-    /\bcharacters\b/.test(q) ||
-    /\bcharacterisation\b/.test(q) ||
-    /\bcharacterization\b/.test(q) ||
-    /\bportray\b/.test(q) ||
-    /\bportrays\b/.test(q) ||
-    /\brole of\b/.test(q)
-  ) {
-    return "character";
-  }
-
-  // ----------------------------------------------------------
-  // LITERARY TECHNIQUES
-  // ----------------------------------------------------------
-
-  if (
-    /\bsymbol\b/.test(q) ||
-    /\bsymbolism\b/.test(q) ||
-    /\birony\b/.test(q) ||
-    /\bironic\b/.test(q) ||
-    /\bsatire\b/.test(q) ||
-    /\bsatirical\b/.test(q) ||
-    /\bimagery\b/.test(q) ||
-    /\bmetaphor\b/.test(q) ||
-    /\bsimile\b/.test(q) ||
-    /\btechnique\b/.test(q) ||
-    /\btechniques\b/.test(q) ||
-    /\blanguage\b/.test(q) ||
-    /\bstyle\b/.test(q)
-  ) {
-    return "literary-technique";
-  }
-
-  // ----------------------------------------------------------
-  // PASSAGE / EXCERPT
-  // ----------------------------------------------------------
-
-  if (
-    /\bpassage\b/.test(q) ||
-    /\bexcerpt\b/.test(q) ||
-    /\bextract\b/.test(q)
-  ) {
-    return "excerpt";
-  }
-
-  // ----------------------------------------------------------
-  // EXPLANATION
-  // ----------------------------------------------------------
-
-  if (
-    /\bwhy\b/.test(q) ||
-    /\bhow\b/.test(q) ||
-    /\bexplain\b/.test(q) ||
-    /\bdescribe\b/.test(q) ||
-    /\bsignificance\b/.test(q) ||
-    /\bimportance\b/.test(q) ||
-    /\beffect\b/.test(q) ||
-    /\bcause\b/.test(q) ||
-    /\breasons\b/.test(q)
-  ) {
-    return "explanation";
-  }
-
-  return "general";
-}
-
-// ============================================================
-// FETCH WITH TIMEOUT
-// ============================================================
-
-async function fetchWithTimeout(
-  url: string,
-  options: RequestInit,
-  timeoutMs = REQUEST_TIMEOUT_MS
-): Promise<Response> {
-  const controller =
-    new AbortController();
-
-  const timeout =
-    setTimeout(
-      () => controller.abort(),
-      timeoutMs
-    );
-
-  try {
-    return await fetch(
-      url,
-      {
-        ...options,
-        signal:
-          controller.signal,
-      }
-    );
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-// ============================================================
+// ================================================================
 // VOYAGE EMBEDDING
-//
-// IMPORTANT:
-// We intentionally keep voyage-3 here because your existing
-// database embeddings must be generated with the same model
-// used for querying.
-//
-// Do NOT casually change this to another Voyage model unless
-// the entire embedding corpus is regenerated consistently.
-// ============================================================
+// ================================================================
 
 async function embedQuery(
   text: string
 ): Promise<number[]> {
-  const response =
-    await fetchWithTimeout(
-      "https://api.voyageai.com/v1/embeddings",
-      {
-        method: "POST",
 
-        headers: {
-          Authorization:
-            `Bearer ${VOYAGE_API_KEY}`,
+  const response = await fetch(
+    "https://api.voyageai.com/v1/embeddings",
+    {
+      method: "POST",
 
-          "Content-Type":
-            "application/json",
-        },
+      headers: {
+        Authorization:
+          `Bearer ${VOYAGE_API_KEY}`,
+        "Content-Type":
+          "application/json",
+      },
 
-        body: JSON.stringify({
-          input: [text],
-
-          model:
-            VOYAGE_MODEL,
-
-          input_type:
-            "query",
-        }),
-      }
-    );
+      body: JSON.stringify({
+        input: [text],
+        model: "voyage-3",
+        input_type: "query",
+      }),
+    }
+  );
 
   if (!response.ok) {
     const errorText =
@@ -479,7 +195,7 @@ async function embedQuery(
   }
 
   const data =
-    await response.json();
+    await readJsonSafely(response);
 
   const embedding =
     data?.data?.[0]?.embedding;
@@ -489,250 +205,173 @@ async function embedQuery(
     embedding.length === 0
   ) {
     throw new Error(
-      "Voyage returned an invalid embedding."
+      "Voyage returned an invalid or empty embedding."
     );
   }
 
   return embedding;
 }
 
-// ============================================================
-// EVIDENCE CLEANING
+// ================================================================
+// QUESTION CLASSIFICATION
+// ================================================================
 //
-// Prevent malformed database rows from reaching Gemini.
-// ============================================================
+// This is deliberately simple and deterministic.
+// Gemini will still perform the deeper classification.
+// The purpose here is to give the model strong structural hints.
+// ================================================================
 
-function cleanEvidence(
-  chunks: unknown[]
-): EvidenceChunk[] {
-  const cleaned: EvidenceChunk[] = [];
+function classifyQuestion(
+  question: string
+): {
+  type: string;
+  isEssay: boolean;
+} {
 
-  for (
-    const raw of chunks
+  const q = question
+    .toLowerCase()
+    .trim();
+
+  const essayIndicators = [
+    "discuss",
+    "examine",
+    "assess",
+    "evaluate",
+    "to what extent",
+    "how far",
+    "illustrate",
+    "justify",
+    "do you agree",
+    "show how",
+    "explain how",
+    "write an essay",
+    "in an essay",
+  ];
+
+  const isEssay =
+    essayIndicators.some(
+      (phrase) => q.includes(phrase)
+    );
+
+  if (
+    q.startsWith("name ") ||
+    q.startsWith("list ") ||
+    q.startsWith("identify ") ||
+    q.includes("name at least")
   ) {
-    if (
-      !raw ||
-      typeof raw !== "object"
-    ) {
-      continue;
-    }
-
-    const item =
-      raw as Record<string, unknown>;
-
-    const id =
-      item.id;
-
-    const content =
-      cleanString(
-        item.content
-      );
-
-    if (
-      id === undefined ||
-      id === null ||
-      !content
-    ) {
-      continue;
-    }
-
-    cleaned.push({
-      ...item,
-
-      id:
-        String(id),
-
-      content,
-
-      chapter_label:
-        item.chapter_label == null
-          ? null
-          : cleanString(
-              item.chapter_label
-            ),
-
-      similarity:
-        typeof item.similarity ===
-        "number"
-          ? item.similarity
-          : null,
-    });
+    return {
+      type: "list / identification",
+      isEssay: false,
+    };
   }
 
-  return cleaned;
+  if (
+    q.includes("character") ||
+    q.includes("characters")
+  ) {
+    return {
+      type: "character",
+      isEssay,
+    };
+  }
+
+  if (
+    q.includes("theme") ||
+    q.includes("themes")
+  ) {
+    return {
+      type: "theme",
+      isEssay,
+    };
+  }
+
+  if (
+    q.includes("setting") ||
+    q.includes("place")
+  ) {
+    return {
+      type: "setting",
+      isEssay,
+    };
+  }
+
+  if (
+    q.includes("symbol") ||
+    q.includes("symbolism")
+  ) {
+    return {
+      type: "symbolism",
+      isEssay,
+    };
+  }
+
+  if (
+    q.includes("irony") ||
+    q.includes("ironic")
+  ) {
+    return {
+      type: "irony",
+      isEssay,
+    };
+  }
+
+  if (
+    q.includes("style") ||
+    q.includes("technique") ||
+    q.includes("device") ||
+    q.includes("language")
+  ) {
+    return {
+      type: "literary technique / style",
+      isEssay,
+    };
+  }
+
+  if (
+    q.includes("passage") ||
+    q.includes("excerpt")
+  ) {
+    return {
+      type: "passage / excerpt",
+      isEssay,
+    };
+  }
+
+  if (
+    q.includes("event") ||
+    q.includes("what happened") ||
+    q.includes("why did")
+  ) {
+    return {
+      type: "plot / event",
+      isEssay,
+    };
+  }
+
+  return {
+    type: isEssay
+      ? "essay / discussion"
+      : "general literature question",
+    isEssay,
+  };
 }
 
-// ============================================================
-// EVIDENCE BLOCK
-// ============================================================
-
-function buildEvidenceBlock(
-  chunks: EvidenceChunk[]
-): string {
-  return chunks
-    .map(
-      (
-        chunk,
-        index
-      ) => {
-        const chapter =
-          chunk.chapter_label
-            ? ` — ${chunk.chapter_label}`
-            : "";
-
-        return `
-[EVIDENCE ${index + 1}]
-Evidence ID: ${chunk.id}${chapter}
-
-${chunk.content}
-`;
-      }
-    )
-    .join("\n");
-}
-
-// ============================================================
-// GEMINI STRUCTURED OUTPUT SCHEMA
-//
-// This is the major architectural improvement.
-//
-// Instead of merely asking Gemini:
-//
-// "Please give me four paragraphs"
-//
-// we require a structured object containing:
-//
-// introduction
-// body_paragraph_1
-// body_paragraph_2
-// body_paragraph_3
-// body_paragraph_4
-// conclusion
-//
-// Gemini's structured-output feature is designed for this kind
-// of predictable machine-readable response.
-// ============================================================
-
-const ANSWER_SCHEMA = {
-  type: "object",
-
-  properties: {
-    question_type: {
-      type: "string",
-
-      enum: [
-        "essay",
-        "list",
-        "comparison",
-        "theme",
-        "character",
-        "literary-technique",
-        "excerpt",
-        "explanation",
-        "general",
-      ],
-    },
-
-    answer: {
-      type: "string",
-
-      description:
-        "The complete answer for non-essay questions. For essay questions this may be empty because the application constructs the final essay from the dedicated sections.",
-    },
-
-    introduction: {
-      type: "string",
-
-      description:
-        "Essay introduction. Required for essay questions. Must directly answer the question and establish the central argument.",
-    },
-
-    body_paragraph_1: {
-      type: "string",
-
-      description:
-        "First distinct essay body paragraph. Must contain point, evidence, analysis and significance.",
-    },
-
-    body_paragraph_2: {
-      type: "string",
-
-      description:
-        "Second distinct essay body paragraph. Must contain a different argument from body paragraph 1.",
-    },
-
-    body_paragraph_3: {
-      type: "string",
-
-      description:
-        "Third distinct essay body paragraph. Must contain a different argument from body paragraphs 1 and 2.",
-    },
-
-    body_paragraph_4: {
-      type: "string",
-
-      description:
-        "Fourth distinct essay body paragraph. Must contain a different argument from body paragraphs 1, 2 and 3.",
-    },
-
-    conclusion: {
-      type: "string",
-
-      description:
-        "Essay conclusion. Must directly answer the question and synthesise the four body arguments without introducing an unsupported new argument.",
-    },
-
-    list_items: {
-      type: "array",
-
-      items: {
-        type: "string",
-      },
-
-      description:
-        "Numbered list items for list or identification questions.",
-    },
-
-    evidence_refs: {
-      type: "array",
-
-      items: {
-        type: "string",
-      },
-
-      description:
-        "Evidence IDs used in constructing the answer.",
-    },
-  },
-
-  required: [
-    "question_type",
-    "answer",
-    "introduction",
-    "body_paragraph_1",
-    "body_paragraph_2",
-    "body_paragraph_3",
-    "body_paragraph_4",
-    "conclusion",
-    "list_items",
-    "evidence_refs",
-  ],
-};
-
-// ============================================================
+// ================================================================
 // SYSTEM PROMPT
-// ============================================================
+// ================================================================
 
 function buildSystemPrompt(
   bookTitle: string,
-  questionType: QuestionType
+  questionType: string,
+  isEssay: boolean
 ): string {
+
   return `
 You are MASLAH ACADEMY AI.
 
-You are a rigorous KCSE English Literature teacher.
+You are a serious, rigorous KCSE English Literature teacher.
 
-You are answering a question about:
+You are answering a question about the setbook:
 
 "${bookTitle}"
 
@@ -740,444 +379,622 @@ The detected question type is:
 
 "${questionType}"
 
+Essay mode:
+
+${isEssay ? "YES" : "NO"}
+
 ============================================================
-MOST IMPORTANT RULE: TEXTUAL ACCURACY
+MOST IMPORTANT RULE — EVIDENCE FIRST
 ============================================================
 
-The supplied evidence is the authority for the answer.
+The supplied setbook evidence is your textual authority.
 
-You MUST NOT invent literary facts.
+Do NOT invent literary information.
 
 Never manufacture:
 
 - characters
+- names
 - events
 - quotations
-- dialogue
 - relationships
 - chapters
 - settings
 - themes
+- historical facts
 - character traits
 - character roles
-- historical details
 - symbols
 - scenes
 - plot developments
-- textual evidence
+- literary techniques
+- page numbers
+- textual references
 
-If the supplied evidence does not establish something, do not
-pretend that it does.
+just because the question appears to require them.
 
-Say clearly that the supplied evidence is insufficient.
+If the evidence does not establish something, say so.
 
 Accuracy is more important than satisfying an arbitrary number
-requested by the student.
+in the question.
 
 For example:
 
-If the student asks for 20 characters but the supplied evidence
-supports only 14 characters, provide only the supported characters
-and explain the limitation.
+If a student asks for 20 characters but the retrieved evidence
+only establishes 14 characters, do NOT invent six more.
 
-NEVER invent six additional characters.
+Instead state clearly:
 
-============================================================
-EVIDENCE SELECTION
-============================================================
-
-You will receive multiple retrieved evidence passages.
-
-Not every retrieved passage is necessarily relevant.
-
-You MUST:
-
-1. Read all supplied evidence.
-2. Identify which passages genuinely answer the question.
-3. Ignore irrelevant passages.
-4. Combine passages when they clearly concern the same character,
-   event, theme or issue.
-5. Use only supported evidence in the final answer.
-
-Do not use a passage merely because it was retrieved.
+"The supplied evidence establishes 14 characters. It does not
+provide sufficient evidence to identify six additional characters,
+so I will not invent them."
 
 ============================================================
-EVIDENCE REFERENCES
+SECOND MOST IMPORTANT RULE — FINISH THE ANSWER
 ============================================================
 
-When you use evidence, record the corresponding Evidence ID in
-"evidence_refs".
+NEVER stop after:
 
-Only use Evidence IDs actually supplied to you.
+- the introduction
+- one body paragraph
+- two body paragraphs
+- a single point
+- a fragment
+- an unfinished sentence
+- a heading without explanation
+- a point without evidence
+- evidence without analysis
 
-Do not invent Evidence IDs.
+The answer must be COMPLETE before you finish.
 
-============================================================
-CHARACTER DISCIPLINE
-============================================================
+Before returning the answer, silently check that every required
+section has actually been written.
 
-Distinguish carefully between:
+If you start an essay, you MUST finish the essay.
 
-1. Named fictional characters.
-2. Historical figures.
-3. Groups.
-4. Social categories.
-5. Character roles.
-6. Unnamed people.
+If you begin a numbered list, you MUST complete the list that
+the evidence supports.
 
-A role is NOT automatically a character.
+If you start explaining a point, finish the explanation.
 
-For example, descriptions such as:
-
-"father"
-"leader"
-"professor"
-"politician"
-"engineer"
-
-must not automatically become separate characters.
-
-Do not count one person twice because the text describes that
-person in more than one way.
+Never return a partial answer.
 
 ============================================================
-KCSE ANALYSIS
+KCSE ESSAY FORMAT — STRICT
 ============================================================
 
-Do not merely retell the story.
+WHEN THE QUESTION IS AN ESSAY / DISCUSSION QUESTION:
 
-Strong literature analysis normally follows:
+The answer MUST contain exactly:
 
-POINT
+PARAGRAPH 1 — INTRODUCTION
+
+PARAGRAPH 2 — BODY POINT 1
+
+PARAGRAPH 3 — BODY POINT 2
+
+PARAGRAPH 4 — BODY POINT 3
+
+PARAGRAPH 5 — BODY POINT 4
+
+PARAGRAPH 6 — CONCLUSION
+
+That means:
+
+INTRODUCTION
 +
-EVIDENCE
+4 DISTINCT BODY PARAGRAPHS
 +
-EXPLANATION
-+
-SIGNIFICANCE
+CONCLUSION
 
-Use analytical language naturally:
+= 6 complete paragraphs.
 
-"this reveals..."
-"this demonstrates..."
-"this highlights..."
-"this suggests..."
-"this exposes..."
-"this reinforces..."
-"this is significant because..."
-"the writer uses..."
-"this contrast shows..."
+Do NOT stop after paragraph 1 or paragraph 2.
 
-Avoid empty repetition.
+Do NOT produce only one or two body points.
 
-============================================================
-ESSAY QUESTIONS — ABSOLUTE STRUCTURE
-============================================================
+Do NOT produce an essay without a conclusion.
 
-If this is an essay question, the answer MUST contain:
+Do NOT merge the four body paragraphs into one large paragraph.
 
-1. INTRODUCTION
-2. BODY PARAGRAPH 1
-3. BODY PARAGRAPH 2
-4. BODY PARAGRAPH 3
-5. BODY PARAGRAPH 4
-6. CONCLUSION
-
-There MUST be exactly FOUR body paragraphs.
-
-Do not write only one body paragraph.
-
-Do not write only two body paragraphs.
-
-Do not stop after paragraph two.
-
-Do not combine paragraphs 3 and 4.
-
-Do not omit the conclusion.
-
-Do not write placeholders such as:
-
-"Body paragraph 3 would discuss..."
-
-Actually write the complete paragraph.
+Do NOT make the conclusion merely another body point.
 
 ============================================================
 ESSAY INTRODUCTION
 ============================================================
 
-The introduction should:
+The introduction must:
 
-- directly address the question
-- establish the central argument
-- demonstrate understanding of the issue
-- briefly establish the direction of the essay
+1. Directly address the question.
+2. Establish the main argument / position.
+3. Show an understanding of the literary issue.
+4. Prepare the reader for the discussion.
 
-Do not make the introduction a long plot summary.
+Do not waste the introduction on unnecessary biography.
+
+Do not invent background information.
 
 ============================================================
-ESSAY BODY PARAGRAPHS
+ESSAY BODY — FOUR DISTINCT PARAGRAPHS
 ============================================================
 
-Each of the four body paragraphs MUST present a distinct argument.
+There MUST be FOUR separate body paragraphs.
 
-Each paragraph should normally contain:
+Each body paragraph should normally contain:
 
-1. Point
-2. Relevant evidence
-3. Explanation
-4. Analysis
-5. Significance
-6. Connection to the question
+POINT
++
+TEXTUAL EVIDENCE
++
+EXPLANATION / ANALYSIS
++
+LINK TO THE QUESTION
 
-The four arguments must not simply repeat one another.
+A strong body paragraph should answer:
+
+What is the point?
+
+What evidence supports it?
+
+What does the evidence reveal?
+
+Why is that important?
+
+How does it answer the question?
+
+The four paragraphs must contain DISTINCT arguments.
+
+Do not repeat the same point four times.
 
 ============================================================
 ESSAY CONCLUSION
 ============================================================
 
-The conclusion must:
+The sixth paragraph MUST be a conclusion.
 
+The conclusion should:
+
+- bring the argument together
 - directly answer the question
-- synthesise the main arguments
 - reinforce the central interpretation
+- avoid introducing a completely new argument
 
-Do not introduce a completely new unsupported argument.
+Do not end abruptly.
 
-============================================================
-ESSAY LENGTH
-============================================================
-
-Aim for a developed KCSE response.
-
-Introduction:
-approximately 60–120 words.
-
-Each body paragraph:
-approximately 120–220 words.
-
-Conclusion:
-approximately 60–120 words.
-
-These are guidance, not mathematical requirements.
-
-Quality and evidence take priority.
+Do not end immediately after the fourth body paragraph.
 
 ============================================================
-LIST QUESTIONS
+IF THE EVIDENCE DOES NOT SUPPORT FOUR BODY POINTS
 ============================================================
 
-For:
+Do NOT invent evidence.
 
-"name"
-"list"
-"identify"
-"mention"
-"state"
+Instead, use the strongest distinct points actually supported
+by the evidence.
 
-questions:
+If fewer than four genuinely distinct points can be supported,
+you may explain the limitation honestly.
 
-Use list_items.
-
-Do not force a list question into an essay.
-
-Do not pad a list with guesses.
-
-If the evidence supports fewer items than requested, say so.
+However, NEVER manufacture literary facts simply to make the
+essay appear complete.
 
 ============================================================
+ESSAY QUALITY
+============================================================
+
+The essay must sound like a strong KCSE Literature response.
+
+Use:
+
+- clear argument
+- relevant evidence
+- explanation
+- interpretation
+- literary analysis
+- logical transitions
+- formal English
+
+Avoid:
+
+- vague statements
+- empty motivational language
+- unnecessary repetition
+- generic AI language
+- excessive apologies
+- fake quotations
+- invented references
+- padding
+- rambling
+
+Prefer analytical language such as:
+
+"This reveals..."
+"This demonstrates..."
+"This highlights..."
+"This suggests..."
+"This exposes..."
+"This reinforces..."
+"The writer uses..."
+"This is significant because..."
+"Through this character..."
+"Through this event..."
+
+But do not mechanically repeat the same phrase.
+
+============================================================
+QUESTION-SPECIFIC STRUCTURE
+============================================================
+
+If the question is NOT an essay question:
+
+DO NOT force it into a six-paragraph essay.
+
+Instead match the structure to the task.
+
+------------------------------------------------------------
+CHARACTER QUESTIONS
+------------------------------------------------------------
+
+Identify the correct character.
+
+Give the relevant trait, role, action or relationship.
+
+Support it with evidence.
+
+Explain what the evidence reveals.
+
+Connect it to the question.
+
+Do not confuse:
+
+- a named character
+- an unnamed person
+- a historical figure
+- a social group
+- a character role
+- a political institution
+
+Do not count the same character twice under different descriptions.
+
+------------------------------------------------------------
 THEME QUESTIONS
-============================================================
-
-When analysing a theme:
-
-- identify the theme
-- identify relevant characters/events
-- provide evidence
-- explain how the evidence develops the theme
-- explain significance
-- connect directly to the question
+------------------------------------------------------------
 
 Do not merely define the theme.
 
-============================================================
-CHARACTER QUESTIONS
-============================================================
+Show how the theme is developed through:
 
-For character questions:
-
-- identify the correct character
-- state the relevant trait/role
-- support it with evidence
-- analyse the evidence
-- explain significance
-- connect directly to the question
-
-============================================================
-COMPARISON QUESTIONS
-============================================================
-
-For comparison questions:
-
-- establish the basis of comparison
-- identify meaningful similarities
-- identify meaningful differences where supported
-- use evidence for both sides
-- avoid discussing only one side
-
-============================================================
-LITERARY TECHNIQUE QUESTIONS
-============================================================
-
-For symbolism, irony, satire, imagery, metaphor and similar
-questions:
-
-Identify the technique accurately.
-
-Then explain:
-
-TECHNIQUE
-→ EXAMPLE/EVIDENCE
-→ EFFECT
-→ MEANING
-→ SIGNIFICANCE
-
-Do not merely name a technique.
-
-============================================================
-EXCERPT QUESTIONS
-============================================================
-
-For passages/extracts:
-
-First explain what the supplied passage establishes.
-
-Then analyse relevant:
-
-- character
+- characters
+- events
 - conflict
-- tone
+- setting
+- symbolism
 - language
-- literary technique
-- theme
-- significance
+- irony
+- other relevant techniques
 
-Do not invent events outside the supplied evidence.
+Use:
+
+POINT → EVIDENCE → EXPLANATION → SIGNIFICANCE
+
+------------------------------------------------------------
+LIST / NAME / IDENTIFY QUESTIONS
+------------------------------------------------------------
+
+Give a clean numbered list.
+
+For every item:
+
+NAME — brief identification.
+
+Do not pad the list with guesses.
+
+If the evidence supports fewer items than requested, say so.
+
+------------------------------------------------------------
+PASSAGE / EXCERPT QUESTIONS
+------------------------------------------------------------
+
+Focus first on what the supplied passage establishes.
+
+Analyse relevant:
+
+- characters
+- language
+- actions
+- emotions
+- conflict
+- techniques
+- themes
+
+Only connect it to the wider novel where the supplied evidence
+supports the connection.
+
+Do not invent surrounding events.
+
+------------------------------------------------------------
+PLOT / EVENT QUESTIONS
+------------------------------------------------------------
+
+Explain what happened in the correct sequence where the evidence
+allows.
+
+Explain why the event matters.
+
+Do not invent missing stages of the plot.
+
+------------------------------------------------------------
+SYMBOLISM / IRONY / TECHNIQUE
+------------------------------------------------------------
+
+Identify the technique only when the evidence supports it.
+
+Explain:
+
+WHAT
++
+HOW
++
+WHY
+
+Do not label ordinary details as symbols or techniques without
+evidence.
 
 ============================================================
-WRITING STYLE
+CHARACTER COUNTING RULE
 ============================================================
 
-Write natural, formal, intelligent KCSE English.
+If the question asks for a number of characters:
 
-Do not sound like a generic chatbot.
+Count only actual identifiable fictional characters supported
+by the evidence.
 
-Do not repeatedly begin with:
+Do NOT count:
 
-"Based on the provided evidence..."
-
-Do not apologise unnecessarily.
-
-Do not use inflated vocabulary merely to sound sophisticated.
-
-Be clear.
-
-Be analytical.
-
-Be direct.
+- historical figures
+- groups
+- institutions
+- unnamed people
+- character descriptions as separate people
+- the same person twice
+- roles such as "the president" as additional characters
+  when the actual character is already identified
 
 ============================================================
-FINAL INTERNAL CHECK
+HISTORICAL FIGURES
 ============================================================
 
-Before returning your structured answer, silently check:
+If historical figures appear in the evidence, distinguish them
+clearly from fictional characters.
+
+Do not automatically count historical references as novel
+characters.
+
+============================================================
+QUOTATIONS
+============================================================
+
+Never invent quotations.
+
+If the evidence does not contain an exact quotation, paraphrase
+the evidence rather than putting invented words inside quotation
+marks.
+
+============================================================
+CHAPTERS AND PAGES
+============================================================
+
+Never invent chapter numbers or page numbers.
+
+Use a chapter/page reference only if it appears in the supplied
+evidence.
+
+============================================================
+SOURCE LIMITATIONS
+============================================================
+
+The retrieved evidence may not contain every part of the novel.
+
+Therefore:
+
+Do NOT assume that absence from the retrieved evidence means the
+fact does not exist in the complete novel.
+
+Instead say:
+
+"The supplied evidence does not establish this."
+
+This distinction is extremely important.
+
+============================================================
+ANSWER LENGTH
+============================================================
+
+Give enough detail to answer properly.
+
+For ordinary short questions:
+Be concise but complete.
+
+For analytical questions:
+Give developed explanations.
+
+For essay questions:
+Produce the complete six-paragraph structure.
+
+Do NOT deliberately shorten the answer to one or two paragraphs.
+
+Do NOT sacrifice completion for brevity.
+
+============================================================
+FINAL INTERNAL QUALITY CHECK
+============================================================
+
+Before sending the answer, silently check ALL of the following:
 
 1. Did I answer the exact question?
-2. Did I use only supplied evidence?
+2. Did I use only the supplied evidence?
 3. Did I invent anything?
-4. Did I confuse a character with a role?
-5. Did I count anyone twice?
-6. Did I use relevant evidence?
-7. Did I analyse rather than merely narrate?
-8. If this is an essay, did I write an introduction?
-9. If this is an essay, did I write FOUR distinct body paragraphs?
-10. If this is an essay, did I write a conclusion?
-11. Did I actually write every paragraph?
-12. Are the evidence references real?
-13. Is the answer suitable for KCSE?
+4. Did I accidentally invent a quotation?
+5. Did I accidentally invent a character?
+6. Did I confuse a character with a role or group?
+7. Did I repeat a character?
+8. Did I repeat the same argument?
+9. Is every sentence complete?
+10. Is every paragraph complete?
+11. Is every explanation finished?
+12. If this is an essay, are there exactly 6 paragraphs?
+13. If this is an essay, is paragraph 1 the introduction?
+14. If this is an essay, are paragraphs 2–5 four DISTINCT body paragraphs?
+15. If this is an essay, is paragraph 6 a conclusion?
+16. Does the conclusion actually conclude?
+17. Did I stop because I genuinely finished, rather than because
+    I simply ran out of space?
+18. Is the English appropriate for KCSE?
+19. Is the answer analytical rather than merely descriptive?
+20. If evidence is insufficient, did I clearly say so?
 
-Only then return the structured response.
+ONLY AFTER PASSING THIS CHECK should you return the answer.
+
+============================================================
+FINAL INSTRUCTION
+============================================================
+
+COMPLETE THE ANSWER.
+
+DO NOT RETURN A PARTIAL ANSWER.
+
+DO NOT STOP MID-PARAGRAPH.
+
+DO NOT STOP AFTER THE FIRST OR SECOND BODY POINT.
+
+DO NOT OMIT THE CONCLUSION IN AN ESSAY.
+
+DO NOT INVENT INFORMATION TO MAKE THE ANSWER LOOK COMPLETE.
+
+Accuracy + evidence + structure + completion are all required.
 `;
 }
 
-// ============================================================
-// USER PROMPT
-// ============================================================
+// ================================================================
+// EVIDENCE PREPARATION
+// ================================================================
+
+function prepareEvidence(
+  chunks: BookChunk[]
+): BookChunk[] {
+
+  const prepared: BookChunk[] = [];
+
+  let totalChars = 0;
+
+  for (const chunk of chunks) {
+
+    if (
+      !chunk ||
+      typeof chunk.content !== "string"
+    ) {
+      continue;
+    }
+
+    const content =
+      cleanText(chunk.content);
+
+    if (!content) {
+      continue;
+    }
+
+    if (
+      totalChars >=
+      MAX_TOTAL_EVIDENCE_CHARS
+    ) {
+      break;
+    }
+
+    const remaining =
+      MAX_TOTAL_EVIDENCE_CHARS -
+      totalChars;
+
+    const allowedLength =
+      Math.min(
+        MAX_CHUNK_CHARS,
+        remaining
+      );
+
+    const trimmedContent =
+      content.slice(0, allowedLength);
+
+    prepared.push({
+      ...chunk,
+      content: trimmedContent,
+    });
+
+    totalChars +=
+      trimmedContent.length;
+  }
+
+  return prepared;
+}
+
+// ================================================================
+// BUILD USER PROMPT
+// ================================================================
 
 function buildUserPrompt(
   question: string,
-  questionType: QuestionType,
+  chunks: BookChunk[],
   bookTitle: string,
-  chunks: EvidenceChunk[]
+  questionType: string,
+  isEssay: boolean
 ): string {
-  const evidence =
-    buildEvidenceBlock(
-      chunks
-    );
 
-  let specialInstructions =
-    "";
+  const evidenceBlock =
+    chunks
+      .map((chunk, index) => {
 
-  if (
-    questionType ===
-    "essay"
-  ) {
-    specialInstructions = `
-THIS IS AN ESSAY.
+        const chapter =
+          chunk.chapter_label
+            ? ` — ${chunk.chapter_label}`
+            : "";
 
-You MUST fill all of these fields with substantial writing:
+        return `
+[EVIDENCE ${index + 1}${chapter}]
 
-introduction
-body_paragraph_1
-body_paragraph_2
-body_paragraph_3
-body_paragraph_4
-conclusion
-
-The four body paragraphs MUST contain four distinct arguments.
-
-Do not leave any of these fields empty.
-
-Do not merge paragraphs.
-
-Do not provide a shortened essay.
+${chunk.content}
 `;
-  }
+      })
+      .join("\n");
 
-  if (
-    questionType ===
-    "list"
-  ) {
-    specialInstructions = `
-THIS IS A LIST / IDENTIFICATION QUESTION.
+  const essayInstruction = isEssay
+    ? `
+IMPORTANT ESSAY REQUIREMENT:
 
-Use list_items.
+This is an essay/discussion question.
 
-Do not manufacture additional entries.
+Your final answer MUST be:
 
-If the evidence supports fewer entries than requested, give the
-supported entries and explicitly state the limitation.
+Paragraph 1: Introduction
+Paragraph 2: Body Point 1
+Paragraph 3: Body Point 2
+Paragraph 4: Body Point 3
+Paragraph 5: Body Point 4
+Paragraph 6: Conclusion
+
+Do not stop after paragraph 1 or 2.
+
+Write all four body paragraphs and the conclusion before ending.
+`
+    : `
+This is not necessarily a six-paragraph essay.
+
+Use the structure appropriate to the question.
 `;
-  }
 
   return `
-SETBOOK:
+============================================================
+SETBOOK
+============================================================
+
 ${bookTitle}
-
-============================================================
-STUDENT QUESTION
-============================================================
-
-${question}
 
 ============================================================
 QUESTION TYPE
@@ -1186,89 +1003,103 @@ QUESTION TYPE
 ${questionType}
 
 ============================================================
-SUPPLIED SETBOOK EVIDENCE
+STUDENT QUESTION
 ============================================================
 
-${evidence}
+${question}
+
+============================================================
+RELEVANT SETBOOK EVIDENCE
+============================================================
+
+${evidenceBlock}
 
 ============================================================
 TASK
 ============================================================
 
-Answer the student's question using the supplied evidence as
-your textual authority.
+Answer the student's question as a strong KCSE English Literature
+teacher.
 
-${specialInstructions}
+Use the evidence above as your textual authority.
 
-Remember:
+Do not invent facts.
 
-- Do not invent facts.
-- Do not invent characters.
-- Do not invent quotations.
-- Do not invent events.
-- Do not use unsupported general knowledge.
-- Ignore irrelevant retrieved passages.
-- Use only genuine evidence.
-- Make the answer analytical and KCSE appropriate.
+Do not invent quotations.
 
-Return the structured answer.
+Do not invent characters.
+
+Do not invent chapter or page references.
+
+Do not treat historical figures, groups or character roles as
+fictional characters unless the evidence clearly establishes them
+as such.
+
+${essayInstruction}
+
+Your answer must be COMPLETE.
+
+Before finishing, silently check that no paragraph, sentence,
+argument or explanation has been left incomplete.
+
+Do not discuss your internal reasoning.
+
+Return ONLY the final student-facing answer.
 `;
 }
 
-// ============================================================
-// EXTRACT TEXT FROM GEMINI RESPONSE
-// ============================================================
+// ================================================================
+// EXTRACT GEMINI TEXT
+// ================================================================
+//
+// The current Interactions API exposes output_text.
+// We use that first.
+//
+// We retain a steps fallback because complex responses may contain
+// text blocks inside steps.
+// ================================================================
 
 function extractGeminiText(
   data: any
 ): string {
-  // Current SDK-style convenience field,
-  // if exposed by the endpoint.
+
   if (
-    typeof data?.output_text ===
-    "string" &&
+    typeof data?.output_text === "string" &&
     data.output_text.trim()
   ) {
-    return data.output_text.trim();
+    return cleanText(
+      data.output_text
+    );
   }
 
-  const parts: string[] =
-    [];
+  const textParts: string[] = [];
 
-  if (
-    Array.isArray(
-      data?.steps
-    )
-  ) {
-    for (
-      const step of data.steps
-    ) {
+  if (Array.isArray(data?.steps)) {
+
+    for (const step of data.steps) {
+
       if (
-        step?.type !==
-        "model_output"
+        step?.type !== "model_output"
       ) {
         continue;
       }
 
       if (
-        !Array.isArray(
-          step?.content
-        )
+        !Array.isArray(step.content)
       ) {
         continue;
       }
 
       for (
-        const content of
-          step.content
+        const content of step.content
       ) {
+
         if (
-          content?.type ===
-            "text" &&
-          typeof content?.text ===
+          content?.type === "text" &&
+          typeof content.text ===
             "string"
         ) {
-          parts.push(
+          textParts.push(
             content.text
           );
         }
@@ -1276,971 +1107,386 @@ function extractGeminiText(
     }
   }
 
-  return parts
-    .join("\n")
-    .trim();
-}
-
-// ============================================================
-// JSON EXTRACTION
-//
-// Structured output should already be valid JSON.
-//
-// This fallback handles accidental markdown fences.
-// ============================================================
-
-function parseJsonObject(
-  text: string
-): any {
-  const clean =
-    text
-      .trim()
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/\s*```$/i, "")
-      .trim();
-
-  try {
-    return JSON.parse(
-      clean
-    );
-  } catch {
-    // Try extracting the outermost object.
-    const start =
-      clean.indexOf("{");
-
-    const end =
-      clean.lastIndexOf("}");
-
-    if (
-      start !== -1 &&
-      end > start
-    ) {
-      return JSON.parse(
-        clean.slice(
-          start,
-          end + 1
-        )
-      );
-    }
-
-    throw new Error(
-      "Gemini returned invalid JSON."
-    );
-  }
-}
-
-// ============================================================
-// NORMALISE STRUCTURED ANSWER
-// ============================================================
-
-function normalizeStructuredAnswer(
-  raw: any,
-  questionType: QuestionType
-): StructuredAnswer {
-  const safeArray =
-    Array.isArray(
-      raw?.list_items
-    )
-      ? raw.list_items
-          .filter(
-            (item: unknown) =>
-              typeof item ===
-              "string"
-          )
-          .map(
-            (item: string) =>
-              item.trim()
-          )
-          .filter(Boolean)
-      : [];
-
-  const evidenceRefs =
-    Array.isArray(
-      raw?.evidence_refs
-    )
-      ? raw.evidence_refs
-          .filter(
-            (item: unknown) =>
-              typeof item ===
-              "string"
-          )
-          .map(
-            (item: string) =>
-              item.trim()
-          )
-          .filter(Boolean)
-      : [];
-
-  return {
-    question_type:
-      questionType,
-
-    answer:
-      cleanString(
-        raw?.answer
-      ),
-
-    introduction:
-      cleanString(
-        raw?.introduction
-      ),
-
-    body_paragraph_1:
-      cleanString(
-        raw?.body_paragraph_1
-      ),
-
-    body_paragraph_2:
-      cleanString(
-        raw?.body_paragraph_2
-      ),
-
-    body_paragraph_3:
-      cleanString(
-        raw?.body_paragraph_3
-      ),
-
-    body_paragraph_4:
-      cleanString(
-        raw?.body_paragraph_4
-      ),
-
-    conclusion:
-      cleanString(
-        raw?.conclusion
-      ),
-
-    list_items:
-      safeArray,
-
-    evidence_refs:
-      evidenceRefs,
-  };
-}
-
-// ============================================================
-// EVIDENCE REFERENCE VALIDATION
-// ============================================================
-
-function validateEvidenceRefs(
-  answer: StructuredAnswer,
-  chunks: EvidenceChunk[]
-): boolean {
-  const validIds =
-    new Set(
-      chunks.map(
-        (chunk) =>
-          String(chunk.id)
-      )
-    );
-
-  for (
-    const ref of
-      answer.evidence_refs
-  ) {
-    if (
-      validIds.has(ref)
-    ) {
-      continue;
-    }
-
-    // Allow "Evidence 1" style references.
-    const match =
-      ref.match(
-        /^evidence\s+(\d+)$/i
-      );
-
-    if (match) {
-      const index =
-        Number(
-          match[1]
-        );
-
-      if (
-        index >= 1 &&
-        index <= chunks.length
-      ) {
-        continue;
-      }
-    }
-
-    return false;
-  }
-
-  return true;
-}
-
-// ============================================================
-// ESSAY VALIDATION
-//
-// This is intentionally stricter than merely checking whether
-// the model mentioned "paragraph 3".
-//
-// We verify:
-// - all six sections exist
-// - all four body paragraphs have real content
-// - minimum word counts
-// - paragraphs are not identical
-// - conclusion exists
-// - introduction exists
-// ============================================================
-
-function validateEssay(
-  answer: StructuredAnswer
-): {
-  valid: boolean;
-  problems: string[];
-} {
-  const problems: string[] =
-    [];
-
-  const introduction =
-    answer.introduction;
-
-  const p1 =
-    answer.body_paragraph_1;
-
-  const p2 =
-    answer.body_paragraph_2;
-
-  const p3 =
-    answer.body_paragraph_3;
-
-  const p4 =
-    answer.body_paragraph_4;
-
-  const conclusion =
-    answer.conclusion;
-
-  if (
-    countWords(
-      introduction
-    ) < 35
-  ) {
-    problems.push(
-      "Introduction is too short."
-    );
-  }
-
-  if (
-    countWords(p1) < 70
-  ) {
-    problems.push(
-      "Body paragraph 1 is too short."
-    );
-  }
-
-  if (
-    countWords(p2) < 70
-  ) {
-    problems.push(
-      "Body paragraph 2 is too short."
-    );
-  }
-
-  if (
-    countWords(p3) < 70
-  ) {
-    problems.push(
-      "Body paragraph 3 is too short."
-    );
-  }
-
-  if (
-    countWords(p4) < 70
-  ) {
-    problems.push(
-      "Body paragraph 4 is too short."
-    );
-  }
-
-  if (
-    countWords(
-      conclusion
-    ) < 35
-  ) {
-    problems.push(
-      "Conclusion is too short."
-    );
-  }
-
-  const paragraphs = [
-    p1,
-    p2,
-    p3,
-    p4,
-  ].map(
-    normalizeText
+  return cleanText(
+    textParts.join("\n")
   );
-
-  const unique =
-    new Set(
-      paragraphs
-    );
-
-  if (
-    unique.size !==
-    paragraphs.length
-  ) {
-    problems.push(
-      "Two or more body paragraphs are identical."
-    );
-  }
-
-  return {
-    valid:
-      problems.length === 0,
-
-    problems,
-  };
 }
 
-// ============================================================
-// GENERAL ANSWER VALIDATION
-// ============================================================
+// ================================================================
+// DETECT POSSIBLY INCOMPLETE ANSWERS
+// ================================================================
+//
+// This is deliberately conservative.
+//
+// We do NOT reject every short answer.
+// A short factual question can legitimately have a short answer.
+//
+// For essay mode, however, we require strong structural completion.
+// ================================================================
 
-function validateNonEssayAnswer(
-  answer: StructuredAnswer,
-  questionType: QuestionType
-): {
-  valid: boolean;
-  problems: string[];
-} {
-  const problems: string[] =
-    [];
-
-  if (
-    questionType ===
-    "list"
-  ) {
-    if (
-      answer.list_items
-        .length === 0
-    ) {
-      problems.push(
-        "List question has no list items."
-      );
-    }
-
-    return {
-      valid:
-        problems.length === 0,
-      problems,
-    };
-  }
-
-  if (
-    answer.answer.length <
-    20
-  ) {
-    problems.push(
-      "Answer is too short."
-    );
-  }
-
-  return {
-    valid:
-      problems.length === 0,
-    problems,
-  };
-}
-
-// ============================================================
-// GEMINI CALL
-// ============================================================
-
-async function callGeminiStructured(
-  systemPrompt: string,
-  userPrompt: string
-): Promise<StructuredAnswer> {
-  const response =
-    await fetchWithTimeout(
-      "https://generativelanguage.googleapis.com/v1beta/interactions",
-      {
-        method: "POST",
-
-        headers: {
-          "x-goog-api-key":
-            GEMINI_API_KEY!,
-
-          "Content-Type":
-            "application/json",
-        },
-
-        body: JSON.stringify({
-          model:
-            GEMINI_MODEL,
-
-          system_instruction:
-            systemPrompt,
-
-          input:
-            userPrompt,
-
-          response_format: {
-            type: "text",
-
-            mime_type:
-              "application/json",
-
-            schema:
-              ANSWER_SCHEMA,
-          },
-
-          generation_config: {
-            max_output_tokens:
-              GEMINI_MAX_OUTPUT_TOKENS,
-
-            thinking_level:
-              "high",
-          },
-
-          // We don't need Gemini to retain the interaction
-          // because the evidence is supplied explicitly.
-          store: false,
-        }),
-      }
-    );
-
-  if (!response.ok) {
-    const errorText =
-      await response.text();
-
-    throw new Error(
-      `Gemini API failed (${response.status}): ${errorText}`
-    );
-  }
-
-  const data =
-    await response.json();
-
-  if (
-    data?.status ===
-    "failed"
-  ) {
-    throw new Error(
-      "Gemini interaction failed."
-    );
-  }
-
-  if (
-    data?.status ===
-    "incomplete"
-  ) {
-    throw new Error(
-      "Gemini answer was incomplete because the output limit was reached."
-    );
-  }
+function appearsIncomplete(
+  answer: string,
+  isEssay: boolean
+): boolean {
 
   const text =
-    extractGeminiText(
-      data
-    );
+    cleanText(answer);
 
   if (!text) {
+    return true;
+  }
+
+  // Obvious sentence-level truncation.
+  const lastChar =
+    text[text.length - 1];
+
+  if (
+    lastChar === "," ||
+    lastChar === ":" ||
+    lastChar === ";" ||
+    lastChar === "—"
+  ) {
+    return true;
+  }
+
+  // Unclosed parentheses / quotation marks can indicate truncation.
+  const openParen =
+    (text.match(/\(/g) || []).length;
+
+  const closeParen =
+    (text.match(/\)/g) || []).length;
+
+  if (openParen > closeParen) {
+    return true;
+  }
+
+  // Essay-specific checks.
+  if (isEssay) {
+
+    const paragraphs =
+      text
+        .split(/\n\s*\n/)
+        .map(cleanText)
+        .filter(Boolean);
+
+    // We expect six developed paragraphs.
+    if (paragraphs.length < 6) {
+      return true;
+    }
+
+    // Look for a conclusion-like final paragraph.
+    const finalParagraph =
+      paragraphs[
+        paragraphs.length - 1
+      ].toLowerCase();
+
+    const conclusionSignals = [
+      "in conclusion",
+      "to conclude",
+      "in summary",
+      "therefore",
+      "ultimately",
+      "thus",
+      "in the final analysis",
+      "it is evident",
+      "it can therefore be seen",
+    ];
+
+    const hasConclusionSignal =
+      conclusionSignals.some(
+        (signal) =>
+          finalParagraph.includes(
+            signal
+          )
+      );
+
+    // If the last paragraph is substantial but contains no
+    // conclusion signal, it may still be a conclusion. We therefore
+    // do not reject solely on this basis.
+    //
+    // However, if the last paragraph is extremely short, it is almost
+    // certainly not a developed conclusion.
+    if (
+      !hasConclusionSignal &&
+      finalParagraph.length < 80
+    ) {
+      return true;
+    }
+
+    // A proper essay should have a substantial body.
+    const bodyParagraphs =
+      paragraphs.slice(1, 5);
+
+    const weakBodyCount =
+      bodyParagraphs.filter(
+        (p) => p.length < 100
+      ).length;
+
+    if (weakBodyCount >= 2) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// ================================================================
+// GEMINI REQUEST
+// ================================================================
+
+async function requestGemini(
+  systemPrompt: string,
+  userPrompt: string
+): Promise<{
+  answer: string;
+  status: string | null;
+  raw: any;
+}> {
+
+  const response = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/interactions",
+    {
+      method: "POST",
+
+      headers: {
+        "x-goog-api-key":
+          GEMINI_API_KEY!,
+        "Content-Type":
+          "application/json",
+      },
+
+      body: JSON.stringify({
+        model: GEMINI_MODEL,
+
+        system_instruction:
+          systemPrompt,
+
+        input:
+          userPrompt,
+
+        generation_config: {
+          // IMPORTANT:
+          // Gemini Interactions API uses max_output_tokens,
+          // not max_tokens.
+          max_output_tokens:
+            MAX_OUTPUT_TOKENS,
+
+          // Gemini 3 documentation recommends using the model's
+          // default temperature rather than forcing a very low
+          // temperature.
+          thinking_level: "medium",
+        },
+
+        // We want a normal completed response rather than a stream
+        // because this Edge Function returns one final JSON object.
+        stream: false,
+      }),
+    }
+  );
+
+  const data =
+    await readJsonSafely(response);
+
+  if (!response.ok) {
+
+    const apiMessage =
+      data?.error?.message ||
+      JSON.stringify(data);
+
     throw new Error(
-      "Gemini returned no answer text."
+      `Gemini API failed (${response.status}): ${apiMessage}`
     );
   }
 
-  const parsed =
-    parseJsonObject(
-      text
-    );
+  const answer =
+    extractGeminiText(data);
 
-  return normalizeStructuredAnswer(
-    parsed,
-    "general"
-  );
+  const status =
+    typeof data?.status === "string"
+      ? data.status
+      : null;
+
+  return {
+    answer,
+    status,
+    raw: data,
+  };
 }
 
-// ============================================================
-// REPAIR PROMPT
+// ================================================================
+// GEMINI FINAL ANSWER
+// ================================================================
 //
-// IMPORTANT:
-// The evidence is included AGAIN during repair.
+// This function can make a second attempt if the first response
+// is incomplete.
 //
-// This prevents the repair call from "fixing" the essay by
-// inventing information that was never in the original evidence.
-// ============================================================
+// The second attempt is NOT asking Gemini to invent anything.
+// It is specifically asking it to finish the response while
+// preserving the evidence restrictions.
+// ================================================================
 
-function buildRepairPrompt(
-  question: string,
-  questionType: QuestionType,
-  bookTitle: string,
-  chunks: EvidenceChunk[],
-  draft: StructuredAnswer,
-  problems: string[]
-): string {
-  const evidence =
-    buildEvidenceBlock(
-      chunks
-    );
+async function callGemini(
+  systemPrompt: string,
+  userPrompt: string,
+  isEssay: boolean
+): Promise<string> {
 
-  return `
-MASLAH ACADEMY AI — ANSWER REPAIR
+  let lastAnswer = "";
 
-SETBOOK:
-${bookTitle}
+  for (
+    let attempt = 1;
+    attempt <= MAX_GEMINI_ATTEMPTS;
+    attempt++
+  ) {
 
-QUESTION:
-${question}
+    let currentPrompt =
+      userPrompt;
 
-QUESTION TYPE:
-${questionType}
+    if (
+      attempt > 1 &&
+      lastAnswer
+    ) {
 
-============================================================
-ORIGINAL SUPPLIED EVIDENCE
-============================================================
-
-${evidence}
+      currentPrompt = `
+${userPrompt}
 
 ============================================================
-DRAFT ANSWER
+COMPLETION REPAIR — ATTEMPT ${attempt}
 ============================================================
 
-${JSON.stringify(
-  draft,
-  null,
-  2
-)}
+The previous generation was incomplete.
 
-============================================================
-VALIDATION PROBLEMS
-============================================================
+Previous generation:
 
-${problems
-  .map(
-    (problem) =>
-      `- ${problem}`
-  )
-  .join("\n")}
+${lastAnswer}
 
-============================================================
-REPAIR TASK
-============================================================
+DO NOT START A NEW UNRELATED ANSWER.
 
-Correct the answer.
+Continue / repair the answer so that the FINAL RESPONSE is
+complete.
 
 IMPORTANT:
 
-You are NOT allowed to add literary facts that are absent from
-the supplied evidence.
+- Preserve the evidence discipline.
+- Do not invent literary facts.
+- Do not invent quotations.
+- Do not repeat the same points unnecessarily.
+- Do not leave sentences unfinished.
 
-Do not invent:
+${
+  isEssay
+    ? `
+For this essay, the final answer MUST contain:
 
-- characters
-- events
-- quotations
-- relationships
-- chapters
-- themes
-- settings
-- historical facts
+1. Introduction
+2. Body paragraph 1
+3. Body paragraph 2
+4. Body paragraph 3
+5. Body paragraph 4
+6. Conclusion
 
-Preserve valid evidence from the draft.
+All six paragraphs must be complete.
+`
+    : ""
+}
 
-Remove unsupported claims.
-
-============================================================
-IF THIS IS AN ESSAY
-============================================================
-
-The repaired answer MUST contain:
-
-INTRODUCTION
-
-BODY PARAGRAPH 1
-
-BODY PARAGRAPH 2
-
-BODY PARAGRAPH 3
-
-BODY PARAGRAPH 4
-
-CONCLUSION
-
-All four body paragraphs must be complete.
-
-All four must present distinct arguments.
-
-Do not merge them.
-
-Do not omit paragraph 3.
-
-Do not omit paragraph 4.
-
-Do not omit the conclusion.
-
-Return the corrected structured JSON answer.
+Return the COMPLETE final answer, not a commentary about what was
+missing.
 `;
-}
+    }
 
-// ============================================================
-// FORMAT FINAL ANSWER
-//
-// This is what the frontend receives as "answer".
-//
-// For essays, the six sections are explicitly rendered.
-//
-// This guarantees that the frontend doesn't have to guess how
-// Gemini intended to structure the essay.
-// ============================================================
-
-function formatFinalAnswer(
-  answer: StructuredAnswer,
-  questionType: QuestionType
-): string {
-  // ----------------------------------------------------------
-  // ESSAY
-  // ----------------------------------------------------------
-
-  if (
-    questionType ===
-    "essay"
-  ) {
-    return [
-      "## Introduction",
-      "",
-      answer.introduction,
-
-      "",
-      "## Body Paragraph 1",
-      "",
-      answer.body_paragraph_1,
-
-      "",
-      "## Body Paragraph 2",
-      "",
-      answer.body_paragraph_2,
-
-      "",
-      "## Body Paragraph 3",
-      "",
-      answer.body_paragraph_3,
-
-      "",
-      "## Body Paragraph 4",
-      "",
-      answer.body_paragraph_4,
-
-      "",
-      "## Conclusion",
-      "",
-      answer.conclusion,
-    ].join("\n");
-  }
-
-  // ----------------------------------------------------------
-  // LIST
-  // ----------------------------------------------------------
-
-  if (
-    questionType ===
-    "list"
-  ) {
-    return answer.list_items
-      .map(
-        (
-          item,
-          index
-        ) =>
-          `${index + 1}. ${item}`
-      )
-      .join("\n");
-  }
-
-  // ----------------------------------------------------------
-  // ALL OTHER QUESTIONS
-  // ----------------------------------------------------------
-
-  return answer.answer;
-}
-
-// ============================================================
-// REPAIR LOOP
-//
-// First generation.
-// If invalid:
-//   repair #1
-//
-// If still invalid:
-//   repair #2
-//
-// We intentionally cap the number of repairs so one request
-// cannot loop forever.
-// ============================================================
-
-async function generateReliableAnswer(
-  question: string,
-  questionType: QuestionType,
-  bookTitle: string,
-  chunks: EvidenceChunk[]
-): Promise<{
-  structured: StructuredAnswer;
-  repairCount: number;
-}> {
-  const systemPrompt =
-    buildSystemPrompt(
-      bookTitle,
-      questionType
-    );
-
-  const userPrompt =
-    buildUserPrompt(
-      question,
-      questionType,
-      bookTitle,
-      chunks
-    );
-
-  let answer =
-    await callGeminiStructured(
-      systemPrompt,
-      userPrompt
-    );
-
-  answer.question_type =
-    questionType;
-
-  // ----------------------------------------------------------
-  // Evidence validation
-  // ----------------------------------------------------------
-
-  if (
-    !validateEvidenceRefs(
-      answer,
-      chunks
-    )
-  ) {
-    answer.evidence_refs =
-      [];
-  }
-
-  // ----------------------------------------------------------
-  // First validation
-  // ----------------------------------------------------------
-
-  let validation =
-    questionType ===
-    "essay"
-      ? validateEssay(
-          answer
-        )
-      : validateNonEssayAnswer(
-          answer,
-          questionType
-        );
-
-  let repairCount = 0;
-
-  // ----------------------------------------------------------
-  // Repair up to TWO times
-  // ----------------------------------------------------------
-
-  while (
-    !validation.valid &&
-    repairCount < 2
-  ) {
-    repairCount++;
-
-    const repairPrompt =
-      buildRepairPrompt(
-        question,
-        questionType,
-        bookTitle,
-        chunks,
-        answer,
-        validation.problems
-      );
-
-    answer =
-      await callGeminiStructured(
+    const result =
+      await requestGemini(
         systemPrompt,
-        repairPrompt
+        currentPrompt
       );
 
-    answer.question_type =
-      questionType;
+    lastAnswer =
+      cleanText(result.answer);
+
+    const incompleteByStatus =
+      result.status ===
+      "incomplete";
+
+    const incompleteByContent =
+      appearsIncomplete(
+        lastAnswer,
+        isEssay
+      );
 
     if (
-      !validateEvidenceRefs(
-        answer,
-        chunks
-      )
+      lastAnswer &&
+      !incompleteByStatus &&
+      !incompleteByContent
     ) {
-      answer.evidence_refs =
-        [];
+      return lastAnswer;
     }
 
-    validation =
-      questionType ===
-      "essay"
-        ? validateEssay(
-            answer
-          )
-        : validateNonEssayAnswer(
-            answer,
-            questionType
-          );
+    // If Gemini returned an empty answer, retry.
+    if (!lastAnswer) {
+      continue;
+    }
   }
 
-  // ----------------------------------------------------------
-  // Final safety behaviour
-  //
-  // We do NOT invent missing content in JavaScript.
-  //
-  // If Gemini somehow fails after the repair passes, we still
-  // return the best evidence-grounded answer generated rather
-  // than fabricating paragraphs ourselves.
-  // ----------------------------------------------------------
-
-  return {
-    structured:
-      answer,
-
-    repairCount,
-  };
-}
-
-// ============================================================
-// RETRIEVE BOOK EVIDENCE
-// ============================================================
-
-async function retrieveEvidence(
-  question: string,
-  bookTitle: string | null
-): Promise<EvidenceChunk[]> {
-  const embedding =
-    await embedQuery(
-      question
-    );
-
-  const {
-    data,
-    error,
-  } =
-    await supabase.rpc(
-      "match_book_chunks",
-      {
-        query_embedding:
-          embedding,
-
-        match_book_title:
-          bookTitle,
-
-        match_count:
-          MATCH_COUNT,
-      }
-    );
-
-  if (error) {
-    throw new Error(
-      `Evidence retrieval failed: ${error.message}`
-    );
+  // If the API gave us something after all attempts, return it
+  // rather than hiding the response completely.
+  if (lastAnswer) {
+    return lastAnswer;
   }
 
-  if (
-    !Array.isArray(data)
-  ) {
-    return [];
-  }
-
-  return cleanEvidence(
-    data
+  throw new Error(
+    "Gemini failed to produce a complete text answer."
   );
 }
 
-// ============================================================
-// LOG QUESTION
-//
-// Logging must NEVER make the student request fail.
-//
-// Therefore this is deliberately fire-and-forget.
-// ============================================================
+// ================================================================
+// EVIDENCE OUTPUT
+// ================================================================
 
-function logQuestion(
-  bookTitle: string | null,
-  question: string,
-  answer: string,
-  chunks: EvidenceChunk[],
-  questionType: QuestionType,
-  repairCount: number
-): void {
-  supabase
-    .from("question_log")
-    .insert({
-      book_title:
-        bookTitle,
+function buildEvidenceResponse(
+  chunks: BookChunk[]
+) {
 
-      question,
+  return chunks.map(
+    (chunk) => {
 
-      answer,
+      const content =
+        typeof chunk.content ===
+          "string"
+          ? cleanText(chunk.content)
+          : "";
 
-      retrieved_chunk_ids:
-        chunks.map(
-          (
-            chunk
-          ) =>
-            chunk.id
-        ),
+      return {
+        id:
+          chunk.id ?? null,
 
-      // These columns may not exist in your current table.
-      // Therefore we DO NOT send them here.
-      //
-      // Keep the existing schema compatible.
-    })
-    .then(
-      ({
-        error,
-      }) => {
-        if (error) {
-          console.error(
-            "Question logging failed:",
-            error.message
-          );
-        }
-      }
-    );
-}
+        chapter:
+          chunk.chapter_label ??
+          null,
 
-// ============================================================
-// RESPONSE HELPERS
-// ============================================================
-
-function jsonResponse(
-  body: unknown,
-  status = 200
-): Response {
-  return new Response(
-    JSON.stringify(
-      body
-    ),
-    {
-      status,
-
-      headers:
-        corsHeaders,
+        excerpt:
+          content.length > 500
+            ? content.slice(0, 500) +
+              "…"
+            : content,
+      };
     }
   );
 }
 
-// ============================================================
+// ================================================================
 // MAIN EDGE FUNCTION
-// ============================================================
+// ================================================================
 
 Deno.serve(
-  async (
-    req
-  ) => {
-    // --------------------------------------------------------
-    // CORS preflight
-    // --------------------------------------------------------
+  async (req: Request) => {
+
+    // ------------------------------------------------------------
+    // CORS
+    // ------------------------------------------------------------
 
     if (
-      req.method ===
-      "OPTIONS"
+      req.method === "OPTIONS"
     ) {
       return new Response(
         "ok",
@@ -2251,260 +1497,321 @@ Deno.serve(
       );
     }
 
-    // --------------------------------------------------------
-    // Only POST is allowed
-    // --------------------------------------------------------
-
+    // Only POST is accepted.
     if (
-      req.method !==
-      "POST"
+      req.method !== "POST"
     ) {
-      return jsonResponse(
-        {
+      return new Response(
+        JSON.stringify({
           error:
             "Method not allowed. Use POST.",
-        },
-        405
+        }),
+        {
+          status: 405,
+
+          headers: {
+            ...corsHeaders,
+            "Content-Type":
+              "application/json",
+          },
+        }
       );
     }
 
     try {
-      // ------------------------------------------------------
-      // Parse request
-      // ------------------------------------------------------
 
-      let body: any;
+      // ----------------------------------------------------------
+      // 1. READ REQUEST
+      // ----------------------------------------------------------
 
-      try {
-        body =
-          await req.json();
-      } catch {
-        return jsonResponse(
-          {
-            error:
-              "Invalid JSON request body.",
-          },
-          400
-        );
-      }
+      const body =
+        await req.json();
 
       const question =
-        cleanString(
-          body?.question
-        );
+        typeof body?.question ===
+          "string"
+          ? cleanText(
+              body.question
+            )
+          : "";
 
       const bookTitle =
-        normalizeBookTitle(
-          body?.bookTitle
-        );
+        typeof body?.bookTitle ===
+          "string"
+          ? cleanText(
+              body.bookTitle
+            )
+          : "";
 
-      // ------------------------------------------------------
-      // Validate question
-      // ------------------------------------------------------
+      // ----------------------------------------------------------
+      // 2. VALIDATE QUESTION
+      // ----------------------------------------------------------
 
-      if (
-        !question
-      ) {
-        return jsonResponse(
-          {
+      if (!question) {
+
+        return new Response(
+          JSON.stringify({
             error:
               "Missing 'question' string.",
-          },
-          400
-        );
-      }
-
-      // Reasonable upper bound prevents accidental huge requests.
-      if (
-        question.length >
-        10_000
-      ) {
-        return jsonResponse(
+          }),
           {
-            error:
-              "Question is too long.",
-          },
-          400
+            status: 400,
+
+            headers: {
+              ...corsHeaders,
+              "Content-Type":
+                "application/json",
+            },
+          }
         );
       }
 
-      // ------------------------------------------------------
-      // Identify question type
-      // ------------------------------------------------------
+      // ----------------------------------------------------------
+      // 3. DETERMINE QUESTION TYPE
+      // ----------------------------------------------------------
 
-      const questionType =
-        detectQuestionType(
+      const classification =
+        classifyQuestion(
           question
         );
 
-      console.log(
-        JSON.stringify({
-          event:
-            "question_received",
+      // ----------------------------------------------------------
+      // 4. EMBED QUESTION
+      // ----------------------------------------------------------
 
-          bookTitle,
-
-          questionType,
-        })
-      );
-
-      // ------------------------------------------------------
-      // Retrieve evidence
-      // ------------------------------------------------------
-
-      const chunks =
-        await retrieveEvidence(
-          question,
-          bookTitle
+      const queryEmbedding =
+        await embedQuery(
+          question
         );
 
-      if (
-        chunks.length ===
-        0
-      ) {
-        return jsonResponse(
-          {
-            error:
-              "No matching setbook evidence was found. Check the selected book or try rephrasing the question.",
-          },
-          404
-        );
-      }
-
-      // ------------------------------------------------------
-      // Generate reliable answer
-      // ------------------------------------------------------
+      // ----------------------------------------------------------
+      // 5. RETRIEVE SETBOOK EVIDENCE
+      // ----------------------------------------------------------
 
       const {
-        structured,
-        repairCount,
-      } =
-        await generateReliableAnswer(
-          question,
-          questionType,
-          bookTitle ??
-            "the selected setbook",
-          chunks
-        );
+        data: retrievedChunks,
+        error: matchError,
+      } = await supabase.rpc(
+        "match_book_chunks",
+        {
+          query_embedding:
+            queryEmbedding,
 
-      // ------------------------------------------------------
-      // Format answer for frontend
-      // ------------------------------------------------------
+          match_book_title:
+            bookTitle || null,
 
-      const answer =
-        formatFinalAnswer(
-          structured,
-          questionType
-        );
+          match_count:
+            RETRIEVAL_COUNT,
+        }
+      );
 
-      // ------------------------------------------------------
-      // Final sanity check
-      // ------------------------------------------------------
-
-      if (
-        !answer ||
-        answer.trim()
-          .length < 10
-      ) {
+      if (matchError) {
         throw new Error(
-          "Generated answer was empty or unusable."
+          `Evidence retrieval failed: ${matchError.message}`
         );
       }
 
-      // ------------------------------------------------------
-      // Log
-      // ------------------------------------------------------
+      if (
+        !retrievedChunks ||
+        !Array.isArray(
+          retrievedChunks
+        ) ||
+        retrievedChunks.length === 0
+      ) {
 
-      logQuestion(
-        bookTitle,
-        question,
-        answer,
-        chunks,
-        questionType,
-        repairCount
-      );
+        return new Response(
+          JSON.stringify({
+            error:
+              "No matching evidence was found for this question. Check the selected setbook or try rephrasing the question.",
+          }),
+          {
+            status: 404,
 
-      // ------------------------------------------------------
-      // Evidence returned to frontend
-      // ------------------------------------------------------
+            headers: {
+              ...corsHeaders,
+              "Content-Type":
+                "application/json",
+            },
+          }
+        );
+      }
 
-      const evidenceUsed =
-        chunks.map(
-          (
-            chunk
-          ) => ({
-            id:
-              String(
-                chunk.id
-              ),
+      // ----------------------------------------------------------
+      // 6. PREPARE EVIDENCE
+      // ----------------------------------------------------------
 
-            chapter:
-              chunk.chapter_label ??
-              null,
-
-            similarity:
-              chunk.similarity ??
-              null,
-
-            excerpt:
-              chunk.content
-                .slice(
-                  0,
-                  350
-                ) +
-              (
-                chunk.content
-                  .length >
-                350
-                  ? "…"
-                  : ""
-              ),
-          })
+      const chunks =
+        prepareEvidence(
+          retrievedChunks as BookChunk[]
         );
 
-      // ------------------------------------------------------
-      // Final response
-      // ------------------------------------------------------
+      if (
+        chunks.length === 0
+      ) {
 
-      return jsonResponse(
+        return new Response(
+          JSON.stringify({
+            error:
+              "Relevant evidence was retrieved, but it contained no usable text.",
+          }),
+          {
+            status: 404,
+
+            headers: {
+              ...corsHeaders,
+              "Content-Type":
+                "application/json",
+            },
+          }
+        );
+      }
+
+      // ----------------------------------------------------------
+      // 7. BUILD PROMPTS
+      // ----------------------------------------------------------
+
+      const systemPrompt =
+        buildSystemPrompt(
+          bookTitle ||
+            "the selected setbook",
+          classification.type,
+          classification.isEssay
+        );
+
+      const userPrompt =
+        buildUserPrompt(
+          question,
+          chunks,
+          bookTitle ||
+            "the selected setbook",
+          classification.type,
+          classification.isEssay
+        );
+
+      // ----------------------------------------------------------
+      // 8. ASK GEMINI
+      // ----------------------------------------------------------
+
+      const answer =
+        await callGemini(
+          systemPrompt,
+          userPrompt,
+          classification.isEssay
+        );
+
+      // ----------------------------------------------------------
+      // 9. FINAL SAFETY CHECK
+      // ----------------------------------------------------------
+
+      const finalAnswer =
+        cleanText(answer);
+
+      if (!finalAnswer) {
+        throw new Error(
+          "Gemini returned an empty final answer."
+        );
+      }
+
+      // ----------------------------------------------------------
+      // 10. LOG QUESTION
+      // ----------------------------------------------------------
+      //
+      // Logging should NEVER prevent the student from receiving
+      // the answer.
+      //
+      // Therefore this is intentionally non-blocking.
+      // ----------------------------------------------------------
+
+      try {
+
+        await supabase
+          .from("question_log")
+          .insert({
+            book_title:
+              bookTitle || null,
+
+            question,
+
+            answer:
+              finalAnswer,
+
+            retrieved_chunk_ids:
+              chunks.map(
+                (chunk) =>
+                  chunk.id
+              ),
+          });
+
+      } catch (logError) {
+
+        console.error(
+          "Question logging failed:",
+          logError
+        );
+      }
+
+      // ----------------------------------------------------------
+      // 11. RETURN FINAL RESPONSE
+      // ----------------------------------------------------------
+
+      return new Response(
+        JSON.stringify({
+          answer:
+            finalAnswer,
+
+          questionType:
+            classification.type,
+
+          isEssay:
+            classification.isEssay,
+
+          evidenceUsed:
+            buildEvidenceResponse(
+              chunks
+            ),
+        }),
         {
-          answer,
+          status: 200,
 
-          questionType,
-
-          bookTitle,
-
-          repairCount,
-
-          evidenceUsed,
-        },
-        200
+          headers: {
+            ...corsHeaders,
+            "Content-Type":
+              "application/json",
+          },
+        }
       );
-    } catch (
-      error
-    ) {
-      // ------------------------------------------------------
-      // Server error
-      // ------------------------------------------------------
+
+    } catch (error) {
+
+      // ----------------------------------------------------------
+      // GLOBAL ERROR HANDLER
+      // ----------------------------------------------------------
 
       console.error(
-        "ask-question error:",
+        "MASLAH ACADEMY ASK QUESTION ERROR:",
         error
       );
 
       const message =
         error instanceof Error
           ? error.message
-          : String(
-              error
-            );
+          : String(error);
 
-      return jsonResponse(
-        {
+      return new Response(
+        JSON.stringify({
           error:
-            message,
-        },
-        500
+            message ||
+            "An unexpected error occurred while generating the answer.",
+        }),
+        {
+          status: 500,
+
+          headers: {
+            ...corsHeaders,
+            "Content-Type":
+              "application/json",
+          },
+        }
       );
     }
   }
