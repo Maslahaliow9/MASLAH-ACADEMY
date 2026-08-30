@@ -334,6 +334,141 @@ body {
   cursor: not-allowed;
 }
 
+/* --- Auth screen --- */
+
+.auth-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--parchment);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 380px;
+  padding: 2rem 1.75rem;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin: 0 1rem;
+}
+
+.auth-card .brand {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin-bottom: 1.5rem;
+}
+
+.auth-tabs {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 1.25rem;
+}
+
+.auth-tab {
+  flex: 1;
+  padding: 0.55rem 0;
+  background: transparent;
+  border: none;
+  font-family: "Inter", sans-serif;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.auth-tab.active {
+  background: var(--ink);
+  color: var(--parchment);
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.auth-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-family: "Inter", sans-serif;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--ink-soft);
+}
+
+.auth-form input {
+  font-family: "Inter", sans-serif;
+  font-size: 0.92rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--parchment);
+  color: var(--text);
+}
+
+.auth-form input:focus {
+  outline: 2px solid var(--maroon-soft);
+  outline-offset: 1px;
+}
+
+.auth-error {
+  font-family: "Inter", sans-serif;
+  font-size: 0.82rem;
+  color: var(--maroon);
+  margin: 0;
+}
+
+.auth-notice {
+  font-family: "Inter", sans-serif;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+  margin: 0;
+}
+
+.auth-submit {
+  font-family: "Inter", sans-serif;
+  font-weight: 600;
+  font-size: 0.92rem;
+  padding: 0.65rem 0;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--maroon);
+  color: #fff;
+  cursor: pointer;
+  margin-top: 0.3rem;
+}
+
+.auth-submit:disabled {
+  background: var(--line);
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.logout-btn {
+  margin-left: auto;
+  font-family: "Inter", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 500;
+  padding: 0.4rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.logout-btn:hover {
+  border-color: var(--maroon-soft);
+  color: var(--maroon);
+}
+
 @media (max-width: 500px) {
   .app {
     border-left: none;
