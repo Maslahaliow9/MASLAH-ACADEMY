@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
-import { askQuestion } from "./lib/supabase.js";
+import { askQuestion, supabase } from "./lib/supabase.js";
+import Auth from "./Auth.jsx";
 
 const BOOKS = ["The Samaritan", "Fathers of Nations"];
 
@@ -11,11 +12,20 @@ const STARTER_PROMPTS = [
 ];
 
 export default function App() {
+  const [session, setSession] = useState(undefined); // undefined = checking, null = logged out
   const [book, setBook] = useState(BOOKS[0]);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef(null);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -44,6 +54,16 @@ export default function App() {
     }
   }
 
+  // Still checking whether a session already exists (avoids a login-screen flash on reload)
+  if (session === undefined) {
+    return <div className="auth-screen" />;
+  }
+
+  // Not logged in — show the login/signup screen and gate everything else
+  if (!session) {
+    return <Auth onAuthed={() => {}} />;
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -53,6 +73,9 @@ export default function App() {
             <h1>Maslah Academy AI</h1>
             <p className="tagline">Evidence-based KCSE setbook answers</p>
           </div>
+          <button className="logout-btn" onClick={() => supabase.auth.signOut()}>
+            Log out
+          </button>
         </div>
         <div className="book-select">
           {BOOKS.map((b) => (
