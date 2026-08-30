@@ -117,9 +117,9 @@ const EMBEDDING_MODEL = "gemini-embedding-001";
 
 const EMBEDDING_DIMENSIONS = 768;
 
-const GEMINI_MAX_OUTPUT_TOKENS = 64000;
+const GEMINI_MAX_OUTPUT_TOKENS = 4000;
 
-const GEMINI_THINKING_LEVEL = "high";
+const GEMINI_THINKING_LEVEL = "low";
 
 const RETRY_LIMIT = 4;
 
@@ -1714,6 +1714,17 @@ async function callGemini(
       if (
         attempt < RETRY_LIMIT
       ) {
+
+        // A 429 means the quota is genuinely exhausted right now —
+        // retrying immediately wastes more of the same quota and
+        // won't succeed until it resets. Fail fast instead.
+        const isQuotaExceeded =
+          error instanceof Error &&
+          error.message.includes("HTTP 429");
+
+        if (isQuotaExceeded) {
+          throw error;
+        }
 
         // 503 ("high demand") benefits from a longer wait than
         // other errors, since Google's own message says these
