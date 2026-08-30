@@ -13,7 +13,7 @@
 //        ↓
 // RELEVANT SETBOOK EVIDENCE
 //        ↓
-// GEMINI 3.7 FLASH (generateContent API)
+// GEMINI 3.7 FLASH (Interactions API)
 //        ↓
 // QUESTION-SPECIFIC KCSE RESPONSE
 //
@@ -34,77 +34,7 @@
 // BODY 4
 // CONCLUSION
 //
-// Exactly four body paragraphs. This has NOT been touched in this
-// revision — the essay pipeline (JSON schema, six-part assembly,
-// validation) is untouched on purpose.
-//
-// ----------------------------------------------------------------
-// WHAT CHANGED IN THIS VERSION (read this before touching the file)
-// ----------------------------------------------------------------
-//
-// 1-5. (Unchanged from the previous revision — see git history.
-//    Summary: normal questions got a lighter config than essays;
-//    the system prompt is built per-mode so normal questions never
-//    see the essay scaffolding; retrieval count is mode-aware; the
-//    function calls generateContent instead of the heavier
-//    Interactions API; and there are three answer tiers — SIMPLE,
-//    ANALYTICAL, ESSAY — trading thinking depth for speed.)
-//
-// 6. ROOT CAUSE OF "SOMETHING WENT WRONG" (THIS REVISION'S MAIN FIX)
-//    — gemini-3.7-flash is a Gemini 3.x model. Google's own
-//    migration guidance for Gemini 3.x models is explicit:
-//    "Replace thinking_budget with the string enum thinking_level."
-//    Gemini 3 Flash / Flash-Lite also cannot fully disable
-//    thinking — there is no "off" state on this model family.
-//    The SIMPLE tier (which handles the bulk of real traffic: every
-//    one/two-mark question, every "name/list/identify" question)
-//    was sending the legacy numeric { thinkingBudget: 0 }. That is
-//    precisely the field Gemini 3.x wants removed. This is why the
-//    app was failing broadly rather than occasionally — SIMPLE is
-//    the most common tier, so most requests hit the failing code
-//    path. ALL THREE TIERS now use thinkingLevel exclusively:
-//    SIMPLE -> "low" (the actual floor on this model — you cannot
-//    go lower), ANALYTICAL -> "medium", ESSAY -> "medium". Because
-//    thinking can no longer be fully switched off anyway, there is
-//    no accuracy trade-off in dropping thinkingBudget: 0 — "low" is
-//    already the cheapest option this model offers.
-//
-// 7. SPEED — three additions, none of which touch essay structure:
-//    a) a lightweight answer cache: identical (book, question) pairs
-//       are served straight from question_log instead of re-running
-//       embedding + retrieval + generation. Classrooms produce a lot
-//       of exact repeat questions ("who is Tuni" gets asked by every
-//       student doing that setbook), so this is a large real-world
-//       win with near-zero risk (falls through silently on any
-//       cache-layer error).
-//    b) every outbound fetch (embedding + generateContent) now has a
-//       bounded timeout via AbortSignal.timeout(), so a stalled
-//       upstream call fails fast into the retry loop instead of
-//       hanging the whole request.
-//    c) the retry loop no longer retries a request that failed with
-//       a non-retryable 4xx (400/403/404) — retrying a malformed
-//       request just burns the retry budget on a guaranteed second
-//       failure. It only retries on timeouts / 429 / 5xx.
-//
-// 8. ACCURACY — ANALYTICAL and ESSAY thinking moved from "low" to
-//    "medium" now that Gemini 3.7 Flash is fast enough at "medium"
-//    that this doesn't cost meaningful latency, and it buys a
-//    noticeably more careful reasoning pass on "discuss"/"analyse"
-//    questions and on essays. Also added a one-shot wider-retrieval
-//    fallback: if the first vector search comes back with zero
-//    chunks, the function automatically retries once with a larger
-//    match_count before giving up. Short, sparse questions ("who is
-//    Tuni") are exactly the case that can under-match on a small
-//    first pass.
-//
-// 9. COVERAGE — explicit detection was added for "who is / who was"
-//    character-identification questions and "when" / "where"
-//    factual-recall questions, so a plain lookup question like
-//    "Who is Tuni?" is recognised as a fast SIMPLE-tier lookup
-//    instead of falling into the generic bucket. A guard makes sure
-//    a question like "Who is Tuni and discuss his significance to
-//    the theme of betrayal?" is NOT misclassified as simple — the
-//    analysis-signal words still win.
+// Exactly four body paragraphs.
 //
 // ================================================================
 //
@@ -187,80 +117,13 @@ const EMBEDDING_MODEL = "gemini-embedding-001";
 
 const EMBEDDING_DIMENSIONS = 768;
 
-const RETRY_LIMIT = 2;
+const GEMINI_MAX_OUTPUT_TOKENS = 64000;
 
-const RETRIEVAL_RETRY_LIMIT = 2;
+const GEMINI_THINKING_LEVEL = "high";
 
-// Bounded timeouts so a stalled upstream call fails fast into the
-// retry loop instead of hanging the whole HTTP request.
-const GEMINI_FETCH_TIMEOUT_MS = 20000;
-const EMBEDDING_FETCH_TIMEOUT_MS = 8000;
+const RETRY_LIMIT = 4;
 
-// ----------------------------------------------------------------
-// MODE-AWARE TUNING
-//
-// Normal questions (definitions, one-mark recall, list/identify,
-// character/theme/style analysis, discussion, passage questions,
-// etc.) are the vast majority of traffic and should feel instant.
-// Essays are rarer and genuinely need more evidence, more room to
-// write, and more thinking — but even they don't need a 64k token
-// ceiling; that was pure latency with no quality benefit, since a
-// KCSE essay tops out at a few hundred words.
-//
-// THREE TIERS, not two — this is the balance between speed and
-// accuracy:
-//
-// - SIMPLE: pure recall (name/list/identify a setting, character,
-//   etc.) or anything worth 1-2 marks regardless of type. These
-//   have one correct-ish answer sitting directly in the evidence.
-//   Thinking set to the lowest level this model offers, smallest
-//   evidence set (6 chunks), smallest token ceiling. Gemini 3.7
-//   Flash cannot fully disable thinking, so "low" is the actual
-//   floor — there's nothing cheaper to reach for here.
-//
-// - ANALYTICAL: theme/character/discussion/comparison/etc. above
-//   2 marks. A "medium" thinking pass, more evidence (10 chunks).
-//   This is where accuracy actually depends on the model being
-//   allowed to think properly — a "discuss how the writer uses X"
-//   question needs a real reasoning pass, not a token-saving one.
-//
-// - ESSAY: unchanged structurally from before — "medium" thinking,
-//   14 chunks, the full four-body-paragraph structure.
-// ----------------------------------------------------------------
-
-const SIMPLE_RETRIEVAL_COUNT = 6;
-const ANALYTICAL_RETRIEVAL_COUNT = 10;
-const ESSAY_RETRIEVAL_COUNT = 14;
-
-// Gemini 3.x models use the string-valued thinkingLevel field
-// exclusively (thinkingBudget is the deprecated, pre-Gemini-3 way
-// of controlling this, and mixing the two APIs is what broke the
-// SIMPLE tier — see changelog item 6 above). "low" is the cheapest
-// level this model family offers; there is no "off".
-const SIMPLE_THINKING_LEVEL = "low";
-const ANALYTICAL_THINKING_LEVEL = "medium";
-const ESSAY_THINKING_LEVEL = "medium";
-
-const SIMPLE_MAX_OUTPUT_TOKENS = 1024;
-const ANALYTICAL_MAX_OUTPUT_TOKENS = 2048;
-const ESSAY_MAX_OUTPUT_TOKENS = 4096;
-
-// Question types that are pure recall/identification — no analysis
-// required, so the lightest thinking level is appropriate even at
-// full mark value.
-const SIMPLE_QUESTION_TYPES = new Set([
-  "list_or_identification",
-  "setting",
-  "character_identification",
-  "recall_fact",
-]);
-
-// Words that signal the question wants real analysis, not a bare
-// lookup. Used to stop "who is X" / "when did X" style questions
-// from being misclassified as SIMPLE when they're actually asking
-// for discussion (e.g. "Who is Tuni and what does he symbolise?").
-const ANALYSIS_SIGNAL_PATTERN =
-  /\b(discuss|explain|analyse|analyze|significan|develop|compare|contrast|contribut|role of|impact|importance|symbol)/;
+const RETRIEVAL_COUNT = 16;
 
 
 // ================================================================
@@ -351,42 +214,6 @@ function isEssayRequest(
 
 
 // ================================================================
-// DETECT MARK ALLOCATION (e.g. "(1 mark)", "(4 marks)")
-// ================================================================
-//
-// Used only to give the model a length hint so a 1-mark question
-// doesn't get a paragraph and a 20-mark question doesn't get one
-// sentence. Purely advisory — never overrides the essay check.
-//
-// ================================================================
-
-function detectMarks(
-  question: string
-): number | null {
-
-  const match = question.match(
-    /\(?\s*(\d{1,2})\s*marks?\s*\)?/i
-  );
-
-  if (!match) {
-    return null;
-  }
-
-  const marks = parseInt(match[1], 10);
-
-  if (
-    Number.isNaN(marks) ||
-    marks <= 0 ||
-    marks > 30
-  ) {
-    return null;
-  }
-
-  return marks;
-}
-
-
-// ================================================================
 // QUESTION TYPE DETECTION
 // ================================================================
 
@@ -408,39 +235,6 @@ function detectQuestionType(
     /\bgive\b/.test(q)
   ) {
     return "list_or_identification";
-  }
-
-  const hasAnalysisSignal =
-    ANALYSIS_SIGNAL_PATTERN.test(q);
-
-  // "Who is X" / "Who was X" — a plain character lookup, unless the
-  // question also carries an analysis signal (in which case it
-  // falls through to the theme/character/discussion checks below,
-  // which correctly route it to the ANALYTICAL tier).
-  if (
-    !hasAnalysisSignal &&
-    /\bwho['’]?s?\s+(is|was|are|were)?\b/.test(q) &&
-    /\bwho\b/.test(q)
-  ) {
-    return "character_identification";
-  }
-
-  // "When did X happen" / "Where does X take place" — plain factual
-  // recall, same guard against analysis-signal questions.
-  if (
-    !hasAnalysisSignal &&
-    (/^\s*when\b/.test(q) ||
-      /\bwhen\s+(did|does|is|was)\b/.test(q))
-  ) {
-    return "recall_fact";
-  }
-
-  if (
-    !hasAnalysisSignal &&
-    /\bwhere\b/.test(q) &&
-    /\b(take place|set|located|happen|based)\b/.test(q)
-  ) {
-    return "setting";
   }
 
   if (
@@ -520,97 +314,7 @@ function detectQuestionType(
     return "analysis";
   }
 
-  // Plain "who is X" fallback that didn't match the guarded check
-  // above (e.g. contained an analysis signal) still deserves a
-  // sensible type rather than the generic bucket.
-  if (/\bwho\b/.test(q)) {
-    return "character";
-  }
-
   return "general_literature_question";
-}
-
-
-// ================================================================
-// DETERMINE ANSWER TIER (simple / analytical / essay)
-// ================================================================
-//
-// This is the speed/accuracy dial. Essay is decided earlier via
-// isEssayRequest() and handled as its own branch throughout: this
-// function only chooses between SIMPLE and ANALYTICAL for
-// everything else.
-//
-// Rule: marks win over type. A question explicitly worth 1-2 marks
-// gets the fast/simple treatment regardless of its detected type,
-// because even a "character" or "theme" question at 1-2 marks is
-// really just asking for a short, direct fact. Anything without an
-// explicit low mark value defaults to ANALYTICAL unless its type is
-// known pure-recall — erring toward giving the model a reasoning
-// pass rather than risking a sloppy fast answer on something that
-// actually needs analysis.
-//
-// ================================================================
-
-type AnswerTier = "simple" | "analytical";
-
-function determineAnswerTier(
-  questionType: string,
-  marks: number | null
-): AnswerTier {
-
-  if (
-    marks !== null &&
-    marks <= 2
-  ) {
-    return "simple";
-  }
-
-  if (
-    SIMPLE_QUESTION_TYPES.has(
-      questionType
-    )
-  ) {
-    return "simple";
-  }
-
-  return "analytical";
-}
-
-
-// ================================================================
-// NON-RETRYABLE HTTP ERROR CHECK
-// ================================================================
-//
-// A 400/403/404 from the Gemini API means the request itself was
-// rejected — retrying the identical request will fail identically.
-// Only timeouts, 429 (rate limit), and 5xx are worth a retry.
-//
-// ================================================================
-
-function isNonRetryableHttpError(
-  error: unknown
-): boolean {
-
-  const message =
-    error instanceof Error
-      ? error.message
-      : String(error);
-
-  const match = message.match(
-    /HTTP (\d{3})/
-  );
-
-  if (!match) {
-    return false;
-  }
-
-  const status = parseInt(match[1], 10);
-
-  return (
-    status === 400 ||
-    status === 403 ||
-    status === 404
-  );
 }
 
 
@@ -641,10 +345,6 @@ async function embedQuery(
           "application/json",
       },
 
-      signal: AbortSignal.timeout(
-        EMBEDDING_FETCH_TIMEOUT_MS
-      ),
-
       body: JSON.stringify({
         model: `models/${EMBEDDING_MODEL}`,
         content: { parts: [{ text }] },
@@ -660,7 +360,7 @@ async function embedQuery(
       await response.text();
 
     throw new Error(
-      `Gemini embedding failed: HTTP ${response.status}: ${errorText}`
+      `Gemini embedding failed: ${errorText}`
     );
   }
 
@@ -689,8 +389,7 @@ async function embedQuery(
 
 async function retrieveEvidence(
   question: string,
-  bookTitle: string | null,
-  matchCount: number
+  bookTitle: string | null
 ): Promise<any[]> {
 
   const queryEmbedding =
@@ -709,7 +408,7 @@ async function retrieveEvidence(
         bookTitle,
 
       match_count:
-        matchCount,
+        RETRIEVAL_COUNT,
     }
   );
 
@@ -775,170 +474,6 @@ function deduplicateChunks(
 
 
 // ================================================================
-// GATHER EVIDENCE — retry on transient failure + widen on empty
-// ================================================================
-//
-// Two independent resilience layers, both new in this revision:
-//
-// 1. RETRY: embedding/vector-search calls can fail transiently
-//    (network blip, momentary Supabase hiccup). Retry once before
-//    giving up, same pattern as the Gemini generation retry.
-//
-// 2. WIDEN: a short, sparse question ("Who is Tuni?") can under-
-//    match against a small match_count on the first pass. If the
-//    first search comes back empty, retry once with a
-//    meaningfully larger match_count before returning the
-//    "no evidence found" error to the student.
-//
-// ================================================================
-
-async function gatherEvidence(
-  question: string,
-  bookTitle: string,
-  matchCount: number
-): Promise<any[]> {
-
-  let lastError: unknown = null;
-
-  let chunks: any[] = [];
-
-  for (
-    let attempt = 1;
-    attempt <= RETRIEVAL_RETRY_LIMIT;
-    attempt++
-  ) {
-
-    try {
-
-      chunks =
-        await retrieveEvidence(
-          question,
-          bookTitle,
-          matchCount
-        );
-
-      lastError = null;
-
-      break;
-
-    } catch (error) {
-
-      lastError = error;
-
-      console.error(
-        `Evidence retrieval attempt ${attempt} failed:`,
-        error
-      );
-
-      if (attempt < RETRIEVAL_RETRY_LIMIT) {
-
-        await new Promise(
-          (resolve) =>
-            setTimeout(resolve, 300 * attempt)
-        );
-      }
-    }
-  }
-
-  if (lastError) {
-    throw lastError;
-  }
-
-  chunks = deduplicateChunks(chunks);
-
-  if (chunks.length === 0) {
-
-    const widerCount =
-      Math.max(matchCount * 2, matchCount + 8);
-
-    try {
-
-      let widerChunks =
-        await retrieveEvidence(
-          question,
-          bookTitle,
-          widerCount
-        );
-
-      widerChunks =
-        deduplicateChunks(widerChunks);
-
-      if (widerChunks.length > 0) {
-        return widerChunks;
-      }
-
-    } catch (error) {
-
-      // If the wider retry also fails, fall through and let the
-      // caller handle the empty-evidence case as before — no need
-      // to surface a second error here.
-      console.error(
-        "Wider evidence retry failed:",
-        error
-      );
-    }
-  }
-
-  return chunks;
-}
-
-
-// ================================================================
-// ANSWER CACHE
-// ================================================================
-//
-// Classrooms produce a lot of exact repeat questions against the
-// same setbook ("Who is Tuni?" gets asked by every student on that
-// book). Rather than re-running embedding + vector search +
-// generation for a question that has already been answered
-// identically, check question_log first. This is a pure speed win
-// with no accuracy trade-off — it only fires on an exact
-// (bookTitle, question) match, and any failure here is swallowed
-// silently so a caching problem can never break a live answer.
-//
-// ================================================================
-
-async function getCachedAnswer(
-  bookTitle: string,
-  question: string
-): Promise<string | null> {
-
-  try {
-
-    const { data, error } =
-      await supabase
-        .from("question_log")
-        .select("answer")
-        .eq("book_title", bookTitle)
-        .eq("question", question)
-        .limit(1);
-
-    if (error || !data || data.length === 0) {
-      return null;
-    }
-
-    const answer = data[0]?.answer;
-
-    return (
-      typeof answer === "string" &&
-      answer.trim()
-    )
-      ? answer
-      : null;
-
-  } catch (error) {
-
-    console.error(
-      "Answer cache lookup failed (non-fatal):",
-      error
-    );
-
-    return null;
-  }
-}
-
-
-// ================================================================
 // BUILD EVIDENCE BLOCK
 // ================================================================
 
@@ -971,10 +506,10 @@ function buildEvidenceBlock(
 
 
 // ================================================================
-// SHARED CORE RULES (used in every system prompt, both modes)
+// MASTER SYSTEM PROMPT
 // ================================================================
 
-function buildCoreRules(
+function buildSystemPrompt(
   bookTitle: string
 ): string {
 
@@ -1010,6 +545,10 @@ do not wrap it in symbols.
 If you need a list, write it as a plain numbered list using
 "1.", "2.", "3." followed by a space — nothing else.
 
+If you need section labels (for example in an essay), write
+them as plain capitalised words on their own line, with no
+symbols before or after them.
+
 ============================================================
 ABSOLUTE RULE 1 — THE SUPPLIED EVIDENCE IS THE AUTHORITY
 ============================================================
@@ -1021,13 +560,26 @@ You MUST NOT manufacture literary information.
 
 Never invent:
 
-- characters, character names, character relationships
-- events, scenes, quotations
-- chapter numbers, page numbers
-- settings, themes, symbols
-- historical facts, character roles, plot developments
-- authorial intentions, literary techniques
-- conversations, actions, motivations, consequences
+- characters
+- character names
+- character relationships
+- events
+- scenes
+- quotations
+- chapter numbers
+- page numbers
+- settings
+- themes
+- symbols
+- historical facts
+- character roles
+- plot developments
+- authorial intentions
+- literary techniques
+- conversations
+- actions
+- motivations
+- consequences
 
 unless the supplied evidence establishes them.
 
@@ -1039,54 +591,57 @@ and briefly, in one sentence, then continue with what the
 evidence does support. That is better than guessing.
 
 ============================================================
-ABSOLUTE RULE 2 — NEVER PAD, NEVER OVER-EXPLAIN
+ABSOLUTE RULE 2 — NEVER PAD AN ANSWER, AND NEVER OVER-EXPLAIN
 ============================================================
 
 Do not add invented material simply because the question
 asks for a particular number of points or characters.
 
-If the question asks for 20 characters but the evidence only
-establishes 14, give the 14 you can support, then add one
-short closing sentence noting the limitation — do not write a
-long explanation of your counting method, and do not repeat
-the disclaimer more than once.
+For example:
 
-Do not count the same character twice because it has two
-roles. Do not count a group, a historical person, a role, or
-an unnamed person as a named character.
+If the question asks for 20 characters but the evidence
+only establishes 14 characters, give the 14 you can support,
+then add one short closing sentence noting that the supplied
+material does not establish more than that — do not write a
+long explanation of your counting method, do not use
+asterisks or bold to flag this, and do not repeat the
+disclaimer more than once.
+
+Do not count the same character twice because the character
+has two roles.
+
+Do not count:
+
+- a group as a character
+- a historical person as a fictional character
+- a role as a character
+- an unnamed person as a named character
+- the same character under two descriptions
 
 ============================================================
-ABSOLUTE RULE 3 — ANSWER THE ACTUAL QUESTION, AT THE RIGHT LENGTH
+ABSOLUTE RULE 3 — ANSWER THE ACTUAL QUESTION
 ============================================================
 
 Before producing the answer, silently determine:
 
 1. What is the command word?
 2. What exactly is being asked?
-3. How many marks is this question worth (if stated)?
+3. What literary issue is being tested?
 4. Which evidence is relevant?
-5. What structure and length actually fits this question?
+5. What structure best answers the question?
 
-Match your answer length to what is actually being asked:
+Do not answer a different question.
 
-- A 1–2 mark question ("name", "state", "identify") needs a
-  short, direct answer — a sentence or a short list. It does
-  NOT need an introduction, explanation paragraph, or essay
-  structure.
-- A "who is X" question needs a short, direct identification:
-  who the character is, their role, and their key relevance —
-  a few sentences, not an essay.
-- A "list/name/identify" question needs a plain numbered list,
-  each item briefly identified — not a discussion.
-- A question asking to "explain", "discuss", "analyse", or
-  "describe" needs real analysis (point, evidence, explanation,
-  significance) but only as long as the question warrants —
-  usually a focused paragraph or a few short paragraphs, not a
-  full essay with introduction/body/conclusion, UNLESS the
-  question explicitly asks for an essay.
-- Do not turn every question into an essay. Do not give a
-  character list when the question asks for analysis. Do not
-  give plot summary when the question asks for analysis.
+Do not turn every question into an essay.
+
+Do not give a character list when the question asks for
+analysis.
+
+Do not give a theme definition when the question asks
+for significance.
+
+Do not give plot summary when the question asks for
+analysis.
 
 ============================================================
 KCSE LITERATURE QUALITY
@@ -1094,203 +649,370 @@ KCSE LITERATURE QUALITY
 
 Use formal, clear, analytical English.
 
-Where analysis is warranted, follow:
+Strong literary analysis normally follows:
 
-POINT → EVIDENCE → EXPLANATION → SIGNIFICANCE
+POINT
+→ EVIDENCE
+→ EXPLANATION
+→ SIGNIFICANCE
 
 Use analytical expressions naturally, including:
 
-"This reveals..." "This suggests..." "This demonstrates..."
-"This highlights..." "This exposes..." "This reinforces..."
-"This illustrates..." "This is significant because..."
-"The writer uses..." "This reflects..." "This shows that..."
+"This reveals..."
+"This suggests..."
+"This demonstrates..."
+"This highlights..."
+"This exposes..."
+"This reinforces..."
+"This illustrates..."
+"This is significant because..."
+"The writer uses..."
+"This reflects..."
+"This shows that..."
 
-Do not repeatedly use the same phrase. Do not produce empty
-analysis. Do not simply retell the story when analysis is
-asked for.
+Do not repeatedly use the same phrase.
+
+Do not produce empty analysis.
+
+Do not simply retell the story.
 
 ============================================================
-CHARACTER QUESTIONS (INCLUDING "WHO IS X")
+CHARACTER QUESTIONS
 ============================================================
 
-Identify the correct character, give the relevant trait, role,
-action or relationship, support it using supplied evidence,
-explain what the evidence reveals, and link the explanation to
-the question. Do not confuse a character with a group,
-historical figure, or character role. For a plain "who is X"
-question, lead with a direct identification sentence (who they
-are and their role in the story), then add one or two
-supporting sentences grounded in the evidence — do not expand
-this into a full character analysis unless the question asks
-for one.
+When the question concerns a character:
+
+1. Identify the correct character.
+2. Give the relevant trait, role, action or relationship.
+3. Support it using supplied evidence.
+4. Explain what the evidence reveals.
+5. Link the explanation to the question.
+
+Do not confuse a character with a group,
+historical figure or character role.
 
 ============================================================
 THEME QUESTIONS
 ============================================================
 
-Do not merely define the theme. Show how it is developed
-through relevant characters, actions, conflicts, events,
-relationships, setting, symbolism, irony, language, or other
-techniques — each claim supported by the supplied evidence.
+When the question concerns a theme:
+
+Do not merely define the theme.
+
+Show how the theme is developed through relevant:
+
+- characters
+- actions
+- conflicts
+- events
+- relationships
+- setting
+- symbolism
+- irony
+- language
+- other literary techniques
+
+Every major claim must be supported by the supplied evidence.
 
 ============================================================
-DISCUSSION / EXPLAIN / ANALYSE QUESTIONS
+DISCUSSION QUESTIONS
 ============================================================
 
-Directly address the proposition. Develop distinct points,
-each with POINT, EVIDENCE, EXPLANATION, and a LINK TO THE
-QUESTION. Avoid repeating one idea in different words. Use as
-many points as the question's mark allocation reasonably
-implies — do not stretch a 2-mark question into five points,
-and do not compress an 8-mark "discuss" question into one.
+For "Discuss..." questions:
+
+The response must directly discuss the proposition.
+
+Develop distinct points.
+
+Avoid repeating one idea using different words.
+
+Each point should contain:
+
+POINT
+EVIDENCE
+EXPLANATION
+LINK TO QUESTION
 
 ============================================================
 LIST / NAME / IDENTIFY QUESTIONS
 ============================================================
 
+For list questions:
+
 Use a plain numbered list ("1.", "2.", "3." — no symbols).
-Each item: NAME — brief accurate identification. No
-unnecessary essay. Do not invent missing items. If the
-requested number exceeds the evidence available, state the
-limitation briefly in one closing sentence.
+
+Each item should contain:
+
+NAME — brief accurate identification.
+
+Do not write an unnecessary essay.
+
+Do not invent missing items.
+
+If the requested number exceeds the evidence available,
+state the limitation briefly in one closing sentence, without
+dwelling on it.
 
 ============================================================
 PASSAGE / EXCERPT QUESTIONS
 ============================================================
 
-Prioritise what the passage actually establishes. Analyse
-character, language, conflict, tone, irony, symbolism, setting,
-themes, or technique only when supported by the evidence. Do
-not invent events immediately before or after the passage.
+When a passage or excerpt is supplied:
+
+Prioritise what the passage actually establishes.
+
+Analyse:
+
+- character
+- language
+- conflict
+- tone
+- irony
+- symbolism
+- setting
+- themes
+- literary techniques
+
+only when supported by the evidence.
+
+Do not invent events immediately before or after the passage.
 
 ============================================================
 GENERAL ANSWER QUALITY
 ============================================================
 
-Never begin every response with "Based on the provided
-evidence...". Vary the opening naturally — start with the
-actual answer. Do not apologise unnecessarily. Do not narrate
-your own process. Just answer, the way a teacher would when
-speaking directly to a student. Do not use fake quotations. Do
-not put quotation marks around paraphrases. Do not create page
-numbers. Do not claim a passage says something it does not. Do
-not use information merely because it sounds plausible.
-`;
-}
+Never begin every response with:
 
+"Based on the provided evidence..."
 
-// ================================================================
-// ESSAY-ONLY ADDENDUM
-//
-// This section is appended ONLY when essayMode is true. Keeping
-// it out of the normal-mode prompt is what stops the model from
-// defaulting every answer — including one-mark questions — into
-// an essay shape. UNCHANGED in this revision, as requested — the
-// essay structure stays exactly as it was.
-// ================================================================
+Vary the opening naturally — start with the actual answer.
 
-function buildEssayAddendum(): string {
+Do not apologise unnecessarily.
 
-  return `
+Do not narrate your own process (for example, do not write
+things like "Note: the provided text explicitly identifies…").
+Just answer, the way a teacher would when speaking directly
+to a student.
+
+Do not use fake quotations.
+
+Do not put quotation marks around paraphrases.
+
+Do not create page numbers.
+
+Do not claim that a passage says something when it does not.
+
+Do not use information merely because it sounds plausible.
+
 ============================================================
-ESSAY MODE — THIS QUESTION IS AN ESSAY REQUEST
+ESSAY MODE
 ============================================================
 
-The student has explicitly asked for an ESSAY. You MUST follow
-the special essay format supplied in the user instructions.
+If the student requests an ESSAY, you MUST follow the
+special essay format supplied in the user instructions.
 
 The final essay MUST contain exactly:
 
 Introduction
+
 Body 1
+
 Body 2
+
 Body 3
+
 Body 4
+
 Conclusion
 
-There must be EXACTLY FOUR body paragraphs. No fifth. No
-sixth. No bullet points. No numbered arguments inside the
-essay. No "Analysis" section. No "Evidence used" section. No
-"Key points" section. No "Summary" section. No additional
-conclusion. No second introduction.
+There must be EXACTLY FOUR body paragraphs.
 
-The four body paragraphs must be four DISTINCT arguments, each
-developing ONE MAIN POINT ONLY, structured as:
+No fifth body paragraph.
 
-POINT + TEXTUAL EVIDENCE + EXPLANATION + SIGNIFICANCE/LINK
+No sixth body paragraph.
+
+No bullet points.
+
+No numbered arguments inside the essay.
+
+No extra "Analysis" section.
+
+No "Evidence used" section inside the essay.
+
+No "Key points" section.
+
+No "Summary" section.
+
+No additional conclusion.
+
+No second introduction.
+
+The four body paragraphs must be four DISTINCT arguments.
+
+Each body paragraph must develop ONE MAIN POINT ONLY.
+
+The structure of each body paragraph should naturally be:
+
+POINT
++
+TEXTUAL EVIDENCE
++
+EXPLANATION
++
+SIGNIFICANCE / LINK TO QUESTION
 
 Do not cram several unrelated points into one body paragraph.
+
 Do not split one point into multiple artificial points.
 
-INTRODUCTION: directly addresses the question, establishes the
-central argument, briefly introduces the relevant literary
-issue, shows the direction of the essay. Not unnecessarily
-long. No list of body points.
+============================================================
+ESSAY INTRODUCTION
+============================================================
 
-BODY 1–4: each one clear point, evidence, analysis,
-significance, and a connection back to the question. Each must
-be genuinely different from the others — no repeated
-arguments.
+The introduction should:
 
-CONCLUSION: separate from the four body paragraphs. Summarises
-the central argument, reinforces the main interpretation,
-directly answers the question. Does not introduce a completely
-new argument.
+- directly address the question
+- establish the central argument
+- briefly introduce the relevant literary issue
+- show the direction of the essay
 
-TARGET LENGTH (targets, not rigid limits — completeness and
-evidence matter more than exact word count):
+Do not make the introduction unnecessarily long.
 
-Introduction: 80–130 words.
-Each body paragraph: 120–190 words.
-Conclusion: 60–100 words.
+Do not provide body points in list form.
 
-If the evidence does not support enough distinct arguments, do
-NOT invent arguments — use only what can legitimately be
-established, and say so briefly within the relevant paragraph.
+============================================================
+ESSAY BODY 1
+============================================================
 
-FINAL INTERNAL CHECK before returning: exactly four distinct
-body paragraphs, a separate intro and conclusion, no invented
-literary facts, no markdown symbols, and the essay is complete
-(never stop after Body 1, 2, or 3 — always finish through the
-conclusion).
+Body 1 must contain one strong argument.
+
+It must:
+
+- state one clear point
+- support the point with evidence
+- analyse the evidence
+- explain its significance
+- connect the paragraph to the question
+
+============================================================
+ESSAY BODY 2
+============================================================
+
+Body 2 must contain one DIFFERENT strong argument.
+
+It must not simply repeat Body 1.
+
+Use relevant evidence.
+
+Analyse rather than summarise.
+
+============================================================
+ESSAY BODY 3
+============================================================
+
+Body 3 must contain one DIFFERENT strong argument.
+
+It must not repeat Body 1 or Body 2.
+
+Use relevant evidence.
+
+Explain how the evidence answers the question.
+
+============================================================
+ESSAY BODY 4
+============================================================
+
+Body 4 must contain one DIFFERENT strong argument.
+
+It must not repeat the previous body paragraphs.
+
+Use relevant evidence.
+
+End the paragraph by connecting the argument to the
+question.
+
+============================================================
+ESSAY CONCLUSION
+============================================================
+
+The conclusion MUST be separate from the four body
+paragraphs.
+
+It should:
+
+- summarise the central argument
+- reinforce the main interpretation
+- directly answer the question
+
+Do not introduce a completely new argument.
+
+============================================================
+ESSAY LENGTH
+============================================================
+
+The essay should be complete but not unnecessarily bloated.
+
+Aim approximately for:
+
+Introduction:
+80–130 words.
+
+Each body paragraph:
+120–190 words.
+
+Conclusion:
+60–100 words.
+
+These are targets, not rigid mathematical limits.
+
+Completeness and evidence are more important than word count.
+
+============================================================
+ESSAY EVIDENCE LIMITATION
+============================================================
+
+If the evidence does not support enough distinct arguments,
+DO NOT invent arguments.
+
+Instead, use only what can legitimately be established.
+
+If one required aspect cannot be established, clearly say so
+within the appropriate paragraph rather than manufacturing
+literary facts.
+
+============================================================
+FINAL INTERNAL QUALITY CHECK
+============================================================
+
+Before returning an answer, silently verify:
+
+1. Did I answer the exact question?
+2. Did I use the correct setbook?
+3. Did I rely on supplied evidence?
+4. Did I invent anything?
+5. Did I invent quotations?
+6. Did I invent chapters?
+7. Did I invent characters?
+8. Did I confuse characters and roles?
+9. Did I repeat a character?
+10. Did I analyse rather than merely summarise?
+11. Is the response complete?
+12. Did the answer stop prematurely?
+13. Is the structure appropriate?
+14. If this is an essay, are there exactly four body
+    paragraphs?
+15. Does the essay have an introduction?
+16. Does the essay have a separate conclusion?
+17. Does every body paragraph contain one main point?
+18. Does every body paragraph contain explanation?
+19. Does the conclusion avoid introducing a new argument?
+20. Is the English suitable for KCSE?
+21. Does the answer contain any markdown symbols (asterisks,
+    ## headers, backticks)? If so, remove them before
+    returning.
+
+Only after this internal check should you return the answer.
 `;
-}
-
-
-// ================================================================
-// MASTER SYSTEM PROMPT (mode-aware)
-// ================================================================
-
-function buildSystemPrompt(
-  bookTitle: string,
-  essayMode: boolean
-): string {
-
-  const core = buildCoreRules(bookTitle);
-
-  if (essayMode) {
-    return core + "\n" + buildEssayAddendum();
-  }
-
-  // Normal mode: explicitly tell the model NOT to write an essay,
-  // since without this guardrail models tend to default toward
-  // the fullest, safest-looking structure for any literature
-  // question.
-  return (
-    core +
-    `
-============================================================
-THIS IS NOT AN ESSAY REQUEST
-============================================================
-
-Do not write an introduction/body/conclusion essay structure.
-Do not write four body paragraphs. Answer only what this
-specific question asks, at a length appropriate to it — from a
-single short sentence for a one-mark recall question, up to a
-few focused paragraphs for a "discuss" or "analyse" question.
-Never pad a short answer into an essay.
-`
-  );
 }
 
 
@@ -1301,8 +1023,7 @@ Never pad a short answer into an essay.
 function buildNormalUserPrompt(
   question: string,
   bookTitle: string,
-  chunks: any[],
-  marks: number | null
+  chunks: any[]
 ): string {
 
   const questionType =
@@ -1311,18 +1032,13 @@ function buildNormalUserPrompt(
   const evidence =
     buildEvidenceBlock(chunks);
 
-  const marksLine =
-    marks !== null
-      ? `\nMARKS ALLOCATED: ${marks} — calibrate the length and depth of your answer to this. A 1–2 mark question wants a short, direct answer, not a paragraph.\n`
-      : "";
-
   return `
 SETBOOK:
 ${bookTitle}
 
 QUESTION TYPE:
 ${questionType}
-${marksLine}
+
 RELEVANT SETBOOK EVIDENCE:
 
 ${evidence}
@@ -1338,17 +1054,32 @@ ${question}
 TASK:
 
 Answer the student's question as a strong KCSE English
-Literature teacher, using the supplied evidence as the textual
-authority. Do not invent anything. Answer the exact question,
-in the structure and length it actually calls for — this is
-NOT an essay unless the question itself says so. If it is a
-factual/list/identification question (including "who is X"),
-be precise and brief. If it requires analysis, explain the
-significance of the evidence, but do not over-write. If the
-evidence is insufficient, say so honestly and briefly.
+Literature teacher.
 
-Remember: plain text only, no markdown symbols. Complete the
-response before returning it — do not stop mid-answer.
+Use the supplied evidence as the textual authority.
+
+Do not invent anything.
+
+Answer the exact question.
+
+Use the appropriate structure for the question.
+
+If it is a factual/list question, be precise.
+
+If it requires analysis, explain the significance of the
+evidence.
+
+If the evidence is insufficient, say so honestly and briefly.
+
+Remember: plain text only, no markdown symbols.
+
+Most importantly:
+
+DO NOT STOP AFTER A SINGLE STATEMENT.
+
+DO NOT GIVE AN UNFINISHED ANSWER.
+
+COMPLETE THE RESPONSE BEFORE RETURNING IT.
 `;
 }
 
@@ -1357,68 +1088,76 @@ response before returning it — do not stop mid-answer.
 // ESSAY JSON SCHEMA
 // ================================================================
 //
-// generateContent takes this directly as generationConfig.
-// responseSchema (paired with responseMimeType:
-// "application/json") — a plain OpenAPI-subset schema, no
-// wrapper object needed. UNCHANGED in this revision.
+// The Interactions API expects response_format as a single
+// object (not an array) shaped like:
+// { type: "text", mime_type: "application/json", schema: {...} }
 //
 // ================================================================
 
-const ESSAY_RESPONSE_SCHEMA = {
-  type: "object",
+const ESSAY_RESPONSE_FORMAT = {
+  type: "text",
 
-  properties: {
+  mime_type:
+    "application/json",
 
-    introduction: {
-      type: "string",
-      description:
-        "A complete KCSE essay introduction that directly answers the question. Plain text, no markdown."
+  schema: {
+    type: "object",
+
+    properties: {
+
+      introduction: {
+        type: "string",
+        description:
+          "A complete KCSE essay introduction that directly answers the question. Plain text, no markdown."
+      },
+
+      body1: {
+        type: "string",
+        description:
+          "The first body paragraph. Exactly one main point, followed by evidence, explanation and significance. Plain text, no markdown."
+      },
+
+      body2: {
+        type: "string",
+        description:
+          "The second body paragraph. A distinct main point, followed by evidence, explanation and significance. Plain text, no markdown."
+      },
+
+      body3: {
+        type: "string",
+        description:
+          "The third body paragraph. A distinct main point, followed by evidence, explanation and significance. Plain text, no markdown."
+      },
+
+      body4: {
+        type: "string",
+        description:
+          "The fourth body paragraph. A distinct main point, followed by evidence, explanation and significance. Plain text, no markdown."
+      },
+
+      conclusion: {
+        type: "string",
+        description:
+          "A separate KCSE essay conclusion that summarises the argument and directly answers the question. Plain text, no markdown."
+      }
     },
 
-    body1: {
-      type: "string",
-      description:
-        "The first body paragraph. Exactly one main point, followed by evidence, explanation and significance. Plain text, no markdown."
-    },
+    required: [
+      "introduction",
+      "body1",
+      "body2",
+      "body3",
+      "body4",
+      "conclusion"
+    ],
 
-    body2: {
-      type: "string",
-      description:
-        "The second body paragraph. A distinct main point, followed by evidence, explanation and significance. Plain text, no markdown."
-    },
-
-    body3: {
-      type: "string",
-      description:
-        "The third body paragraph. A distinct main point, followed by evidence, explanation and significance. Plain text, no markdown."
-    },
-
-    body4: {
-      type: "string",
-      description:
-        "The fourth body paragraph. A distinct main point, followed by evidence, explanation and significance. Plain text, no markdown."
-    },
-
-    conclusion: {
-      type: "string",
-      description:
-        "A separate KCSE essay conclusion that summarises the argument and directly answers the question. Plain text, no markdown."
-    }
-  },
-
-  required: [
-    "introduction",
-    "body1",
-    "body2",
-    "body3",
-    "body4",
-    "conclusion"
-  ]
+    additionalProperties: false
+  }
 };
 
 
 // ================================================================
-// ESSAY USER PROMPT (UNCHANGED)
+// ESSAY USER PROMPT
 // ================================================================
 
 function buildEssayUserPrompt(
@@ -1451,8 +1190,10 @@ ${question}
 
 YOUR TASK:
 
-Write a complete KCSE English Literature essay answering the
-exact question. The essay MUST contain exactly six components:
+Write a complete KCSE English Literature essay answering
+the exact question.
+
+The essay MUST contain exactly six components:
 
 1. INTRODUCTION
 2. BODY 1
@@ -1461,87 +1202,138 @@ exact question. The essay MUST contain exactly six components:
 5. BODY 4
 6. CONCLUSION
 
-Return all six as plain text, no markdown symbols. Each body
-paragraph must contain ONE MAIN POINT ONLY, developed with
-relevant textual evidence, explanation, literary analysis,
-significance, and connection to the question. Body 1–4 must be
-FOUR DISTINCT arguments — no repeats, no fifth, no sixth, no
-bullet points, no list form. Write complete paragraphs.
+You MUST return all six components as plain text with no
+markdown symbols.
 
-The introduction must directly address the question. The
-conclusion must be separate and must not introduce a
+IMPORTANT:
+
+Each body paragraph must contain ONE MAIN POINT ONLY.
+
+Each body paragraph must develop that point using:
+
+- relevant textual evidence
+- explanation
+- literary analysis
+- significance
+- connection to the question
+
+Body 1, Body 2, Body 3 and Body 4 must contain
+FOUR DISTINCT arguments.
+
+Do not repeat the same argument.
+
+Do not create a fifth argument.
+
+Do not create a sixth argument.
+
+Do not use bullet points.
+
+Do not write the four arguments as a list.
+
+Write complete paragraphs.
+
+The introduction must directly address the question.
+
+The conclusion must be separate and must not introduce a
 completely new argument.
 
 ============================================================
 
-EVIDENCE RULE: use ONLY the supplied evidence. Never invent
-characters, events, quotations, chapters, settings,
-relationships, themes, historical facts, or literary details.
-If the evidence does not establish something, do not guess —
-accuracy matters more than filling a gap.
+EVIDENCE RULE:
 
-COMPLETENESS RULE: every field must be complete. Never return
-a fragment or stop after Body 1, 2, or 3. Never omit Body 4 or
-the conclusion. Return the COMPLETE six-part structure.
+Use ONLY the supplied evidence.
+
+Never invent:
+
+- characters
+- events
+- quotations
+- chapters
+- settings
+- relationships
+- themes
+- historical facts
+- literary details
+
+If the evidence does not establish something, do not guess.
+
+Accuracy is more important than filling a gap.
+
+============================================================
+
+COMPLETENESS RULE:
+
+Every field must be complete.
+
+Never return a fragment.
+
+Never return only one sentence.
+
+Never stop after Body 1.
+
+Never stop after Body 2.
+
+Never stop after Body 3.
+
+Never omit Body 4.
+
+Never omit the conclusion.
+
+Return the COMPLETE six-part essay structure.
 `;
 }
 
 
 // ================================================================
-// EXTRACT TEXT FROM A generateContent RESPONSE
-// ================================================================
-//
-// generateContent returns:
-// { candidates: [ { content: { parts: [ { text: "..." } ] },
-//                    finishReason: "STOP" | "MAX_TOKENS" | ... } ] }
-//
+// EXTRACT TEXT FROM GEMINI INTERACTION
 // ================================================================
 
 function extractGeminiText(
   data: any
 ): string {
 
-  const candidate =
-    Array.isArray(data?.candidates)
-      ? data.candidates[0]
-      : null;
-
-  const parts =
-    candidate?.content?.parts;
-
-  if (!Array.isArray(parts)) {
-    return "";
-  }
-
   const textParts: string[] = [];
 
-  for (const part of parts) {
+  if (
+    Array.isArray(data?.steps)
+  ) {
 
-    if (
-      typeof part?.text === "string"
+    for (
+      const step of data.steps
     ) {
-      textParts.push(part.text);
+
+      if (
+        step?.type !== "model_output"
+      ) {
+        continue;
+      }
+
+      if (
+        !Array.isArray(step?.content)
+      ) {
+        continue;
+      }
+
+      for (
+        const content of step.content
+      ) {
+
+        if (
+          content?.type === "text" &&
+          typeof content?.text === "string"
+        ) {
+
+          textParts.push(
+            content.text
+          );
+        }
+      }
     }
   }
 
   return textParts
     .join("\n")
     .trim();
-}
-
-
-function getFinishReason(
-  data: any
-): string | null {
-
-  const candidate =
-    Array.isArray(data?.candidates)
-      ? data.candidates[0]
-      : null;
-
-  return typeof candidate?.finishReason === "string"
-    ? candidate.finishReason
-    : null;
 }
 
 
@@ -1586,6 +1378,11 @@ function cleanJsonText(
 
 // ================================================================
 // STRIP ANY MARKDOWN THAT SLIPPED THROUGH
+// ================================================================
+//
+// Belt-and-braces cleanup in case the model still emits
+// asterisks or markdown headers despite the prompt rules.
+//
 // ================================================================
 
 function stripMarkdown(
@@ -1694,6 +1491,11 @@ function validateEssay(
 // ================================================================
 // ASSEMBLE FINAL ESSAY
 // ================================================================
+//
+// Plain-text section labels only — the frontend does not
+// render markdown, so "##" headers would show up literally.
+//
+// ================================================================
 
 function assembleEssay(
   essay: any
@@ -1730,48 +1532,15 @@ function assembleEssay(
 async function callGemini(
   systemPrompt: string,
   userPrompt: string,
-  mode: AnswerTier | "essay"
+  essayMode: boolean
 ): Promise<{
   answer: string;
+  interactionId: string | null;
   status: string | null;
 }> {
 
-  const essayMode = mode === "essay";
-
   let lastError:
     unknown = null;
-
-  const maxOutputTokens =
-    mode === "essay"
-      ? ESSAY_MAX_OUTPUT_TOKENS
-      : mode === "analytical"
-      ? ANALYTICAL_MAX_OUTPUT_TOKENS
-      : SIMPLE_MAX_OUTPUT_TOKENS;
-
-  // ----------------------------------------------------------------
-  // THINKING — the speed/accuracy dial
-  //
-  // Gemini 3.x models use thinkingLevel (a string: low / medium /
-  // high) exclusively. The legacy numeric thinkingBudget field is
-  // being retired on this model family and mixing it in is what
-  // broke the SIMPLE tier before this revision (see changelog item
-  // 6 at the top of the file). There is also no "off" state on
-  // Gemini 3 Flash, so "low" is simply the cheapest option
-  // available — not a compromise.
-  //
-  // SIMPLE  -> "low"    (pure recall / 1-2 mark questions)
-  // ANALYTICAL -> "medium" (theme/character/discussion/etc.)
-  // ESSAY   -> "medium" (four-body-paragraph KCSE essays)
-  // ----------------------------------------------------------------
-
-  const thinkingLevel =
-    mode === "simple"
-      ? SIMPLE_THINKING_LEVEL
-      : mode === "analytical"
-      ? ANALYTICAL_THINKING_LEVEL
-      : ESSAY_THINKING_LEVEL;
-
-  const thinkingConfig = { thinkingLevel };
 
   for (
     let attempt = 1;
@@ -1783,43 +1552,39 @@ async function callGemini(
 
       const requestBody: any = {
 
-        contents: [
-          {
-            role: "user",
-            parts: [
-              { text: userPrompt },
-            ],
-          },
-        ],
+        model:
+          GEMINI_MODEL,
 
-        systemInstruction: {
-          parts: [
-            { text: systemPrompt },
-          ],
+        system_instruction:
+          systemPrompt,
+
+        input:
+          userPrompt,
+
+        generation_config: {
+
+          thinking_level:
+            GEMINI_THINKING_LEVEL,
+
+          max_output_tokens:
+            GEMINI_MAX_OUTPUT_TOKENS,
         },
 
-        generationConfig: {
-
-          thinkingConfig,
-
-          maxOutputTokens,
-
-          ...(essayMode
-            ? {
-                responseMimeType:
-                  "application/json",
-
-                responseSchema:
-                  ESSAY_RESPONSE_SCHEMA,
-              }
-            : {}),
-        },
+        store:
+          false,
       };
+
+
+      if (essayMode) {
+
+        requestBody.response_format =
+          ESSAY_RESPONSE_FORMAT;
+      }
 
 
       const response =
         await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+          "https://generativelanguage.googleapis.com/v1beta/interactions",
           {
             method: "POST",
 
@@ -1829,11 +1594,10 @@ async function callGemini(
 
               "Content-Type":
                 "application/json",
-            },
 
-            signal: AbortSignal.timeout(
-              GEMINI_FETCH_TIMEOUT_MS
-            ),
+              "Api-Revision":
+                "2026-05-20",
+            },
 
             body:
               JSON.stringify(
@@ -1858,8 +1622,16 @@ async function callGemini(
         await response.json();
 
 
-      const finishReason =
-        getFinishReason(data);
+      const status =
+        typeof data?.status === "string"
+          ? data.status
+          : null;
+
+
+      const interactionId =
+        typeof data?.id === "string"
+          ? data.id
+          : null;
 
 
       const rawAnswer =
@@ -1869,7 +1641,7 @@ async function callGemini(
       if (!rawAnswer) {
 
         throw new Error(
-          `Gemini returned no text output (finishReason: ${finishReason ?? "unknown"}).`
+          "Gemini returned no text output."
         );
       }
 
@@ -1898,8 +1670,9 @@ async function callGemini(
           answer:
             finalEssay,
 
-          status:
-            finishReason,
+          interactionId,
+
+          status,
         };
       }
 
@@ -1909,12 +1682,11 @@ async function callGemini(
       // ----------------------------------------------------------
 
       if (
-        finishReason === "MAX_TOKENS" &&
-        rawAnswer.trim().length < 20
+        status === "incomplete"
       ) {
 
         throw new Error(
-          "Gemini returned an incomplete answer (hit token limit too early)."
+          "Gemini returned an incomplete answer."
         );
       }
 
@@ -1923,8 +1695,9 @@ async function callGemini(
         answer:
           stripMarkdown(rawAnswer),
 
-        status:
-          finishReason,
+        interactionId,
+
+        status,
       };
 
     } catch (error) {
@@ -1937,22 +1710,27 @@ async function callGemini(
         error
       );
 
-      // Don't burn the retry budget on a request that is guaranteed
-      // to fail again identically — a 400/403/404 means the request
-      // itself was rejected, not that anything transient happened.
-      if (isNonRetryableHttpError(error)) {
-        break;
-      }
 
       if (
         attempt < RETRY_LIMIT
       ) {
 
+        // 503 ("high demand") benefits from a longer wait than
+        // other errors, since Google's own message says these
+        // spikes are usually short-lived.
+        const isOverloaded =
+          error instanceof Error &&
+          error.message.includes("HTTP 503");
+
+        const delay = isOverloaded
+          ? 2500 * attempt
+          : 700 * attempt;
+
         await new Promise(
           (resolve) =>
             setTimeout(
               resolve,
-              400 * attempt
+              delay
             )
         );
       }
@@ -1992,11 +1770,9 @@ function sanityCheckAnswer(
     return;
   }
 
-  // Lowered from 25 — a genuine 1-mark answer ("The setting is
-  // Nairobi.") can legitimately be short. This only catches
-  // truly empty/near-empty responses now.
+
   if (
-    cleaned.length < 8
+    cleaned.length < 25
   ) {
 
     throw new Error(
@@ -2172,91 +1948,16 @@ Deno.serve(
         );
 
 
-      const marks =
-        detectMarks(
-          question
-        );
-
-
-      // "simple" | "analytical" | "essay" — the speed/accuracy
-      // tier for this specific question. Essay is decided first
-      // since it overrides everything else.
-      const answerTier =
-        essayMode
-          ? ("essay" as const)
-          : determineAnswerTier(
-              questionType,
-              marks
-            );
-
-
-      // ------------------------------------------------------------
-      // ANSWER CACHE — exact-match fast path
-      //
-      // Skips embedding, vector search, and generation entirely for
-      // a question that has already been asked, word-for-word, for
-      // this same book. Safe to check unconditionally: it only
-      // returns a value on an exact match, and any lookup failure
-      // returns null so the normal pipeline runs as before.
-      // ------------------------------------------------------------
-
-      const cachedAnswer =
-        await getCachedAnswer(
-          bookTitle,
-          question
-        );
-
-      if (cachedAnswer) {
-
-        return new Response(
-          JSON.stringify({
-
-            answer:
-              cachedAnswer,
-
-            bookTitle,
-
-            questionType,
-
-            essayMode,
-
-            answerTier,
-
-            cached: true,
-
-            evidenceUsed: [],
-
-            retrievedEvidenceCount: 0,
-
-          }),
-
-          {
-            status: 200,
-
-            headers: {
-              ...corsHeaders,
-
-              "Content-Type":
-                "application/json",
-            },
-          }
-        );
-      }
-
-
-      const matchCount =
-        answerTier === "essay"
-          ? ESSAY_RETRIEVAL_COUNT
-          : answerTier === "analytical"
-          ? ANALYTICAL_RETRIEVAL_COUNT
-          : SIMPLE_RETRIEVAL_COUNT;
-
-
-      const chunks =
-        await gatherEvidence(
+      let chunks =
+        await retrieveEvidence(
           question,
-          bookTitle,
-          matchCount
+          bookTitle
+        );
+
+
+      chunks =
+        deduplicateChunks(
+          chunks
         );
 
 
@@ -2290,8 +1991,7 @@ Deno.serve(
 
       const systemPrompt =
         buildSystemPrompt(
-          bookTitle,
-          essayMode
+          bookTitle
         );
 
 
@@ -2307,8 +2007,7 @@ Deno.serve(
           : buildNormalUserPrompt(
               question,
               bookTitle,
-              chunks,
-              marks
+              chunks
             );
 
 
@@ -2316,7 +2015,7 @@ Deno.serve(
         await callGemini(
           systemPrompt,
           userPrompt,
-          answerTier
+          essayMode
         );
 
 
@@ -2366,10 +2065,6 @@ Deno.serve(
           questionType,
 
           essayMode,
-
-          answerTier,
-
-          cached: false,
 
           evidenceUsed:
             buildEvidenceResponse(
