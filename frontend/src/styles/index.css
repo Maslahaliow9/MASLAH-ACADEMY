@@ -469,6 +469,99 @@ body {
   color: var(--maroon);
 }
 
+.history-btn {
+  margin-left: auto;
+  font-family: "Inter", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 500;
+  padding: 0.4rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.history-btn:hover {
+  border-color: var(--maroon-soft);
+  color: var(--maroon);
+}
+
+.logout-btn {
+  margin-left: 0.5rem;
+}
+
+.back-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font-size: 1.1rem;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.back-btn:hover {
+  border-color: var(--maroon-soft);
+  color: var(--maroon);
+}
+
+/* --- History screen --- */
+
+.history-entry {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  margin-bottom: 0.7rem;
+  overflow: hidden;
+}
+
+.history-entry-header {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  font-family: "Inter", sans-serif;
+}
+
+.history-book {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--maroon);
+}
+
+.history-question {
+  margin: 0.25rem 0 0;
+  font-size: 0.92rem;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.history-date {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.history-answer {
+  padding: 0 1rem 1rem;
+  border-top: 1px dashed var(--line);
+  margin-top: 0.2rem;
+  padding-top: 0.8rem;
+}
+
 @media (max-width: 500px) {
   .app {
     border-left: none;
