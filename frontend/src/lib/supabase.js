@@ -12,3 +12,14 @@ export async function askQuestion(question, bookTitle) {
   if (error) throw error;
   return data;
 }
+
+export async function getHistory() {
+  // Row-level security already restricts this to the logged-in
+  // student's own rows — no user_id filter needed here.
+  const { data, error } = await supabase
+    .from("question_log")
+    .select("id, book_title, question, answer, created_at")
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return data;
+}
