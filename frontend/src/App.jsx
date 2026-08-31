@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { askQuestion, supabase } from "./lib/supabase.js";
 import Auth from "./Auth.jsx";
+import History from "./History.jsx";
 
 const BOOKS = ["The Samaritan", "Fathers of Nations"];
 
@@ -13,6 +14,7 @@ const STARTER_PROMPTS = [
 
 export default function App() {
   const [session, setSession] = useState(undefined); // undefined = checking, null = logged out
+  const [view, setView] = useState("chat"); // "chat" | "history"
   const [book, setBook] = useState(BOOKS[0]);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -31,22 +33,25 @@ export default function App() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, loading]);
 
-  async function handleSubmit(question) {
+  async function handleSubmit(question, questionBook) {
     const q = (question ?? input).trim();
     if (!q || loading) return;
+    const targetBook = questionBook ?? book;
+    if (questionBook && questionBook !== book) setBook(questionBook);
+    setView("chat");
     setInput("");
-    setMessages((m) => [...m, { role: "student", text: q, book }]);
+    setMessages((m) => [...m, { role: "student", text: q, book: targetBook }]);
     setLoading(true);
     try {
-      const data = await askQuestion(q, book);
+      const data = await askQuestion(q, targetBook);
       setMessages((m) => [
         ...m,
-        { role: "assistant", text: data.answer, evidence: data.evidenceUsed, book },
+        { role: "assistant", text: data.answer, evidence: data.evidenceUsed, book: targetBook },
       ]);
     } catch (err) {
       setMessages((m) => [
         ...m,
-        { role: "error", text: "Something went wrong retrieving that answer. Please try again.", book },
+        { role: "error", text: "Something went wrong retrieving that answer. Please try again.", book: targetBook },
       ]);
       console.error(err);
     } finally {
@@ -64,6 +69,15 @@ export default function App() {
     return <Auth onAuthed={() => {}} />;
   }
 
+  if (view === "history") {
+    return (
+      <History
+        onBack={() => setView("chat")}
+        onReuse={(question, questionBook) => handleSubmit(question, questionBook)}
+      />
+    );
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -73,6 +87,9 @@ export default function App() {
             <h1>Maslah Academy AI</h1>
             <p className="tagline">Evidence-based KCSE setbook answers</p>
           </div>
+          <button className="history-btn" onClick={() => setView("history")}>
+            History
+          </button>
           <button className="logout-btn" onClick={() => supabase.auth.signOut()}>
             Log out
           </button>
