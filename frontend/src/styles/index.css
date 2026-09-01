@@ -562,6 +562,24 @@ body {
   padding-top: 0.8rem;
 }
 
+/* --- About screen --- */
+
+.about-section {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--maroon);
+  border-radius: var(--radius);
+  padding: 1rem 1.1rem;
+  margin-bottom: 0.9rem;
+}
+
+.about-text {
+  font-family: "Source Serif 4", serif;
+  color: var(--text);
+  line-height: 1.6;
+  margin: 0.4rem 0 0;
+}
+
 @media (max-width: 500px) {
   .app {
     border-left: none;
