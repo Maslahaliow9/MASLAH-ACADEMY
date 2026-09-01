@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { askQuestion, supabase } from "./lib/supabase.js";
 import Auth from "./Auth.jsx";
 import History from "./History.jsx";
+import About from "./About.jsx";
 
 const BOOKS = ["The Samaritan", "Fathers of Nations"];
 
@@ -14,7 +15,7 @@ const STARTER_PROMPTS = [
 
 export default function App() {
   const [session, setSession] = useState(undefined); // undefined = checking, null = logged out
-  const [view, setView] = useState("chat"); // "chat" | "history"
+  const [view, setView] = useState("chat"); // "chat" | "history" | "about"
   const [book, setBook] = useState(BOOKS[0]);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -78,6 +79,10 @@ export default function App() {
     );
   }
 
+  if (view === "about") {
+    return <About onBack={() => setView("chat")} />;
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -89,6 +94,9 @@ export default function App() {
           </div>
           <button className="history-btn" onClick={() => setView("history")}>
             History
+          </button>
+          <button className="history-btn" onClick={() => setView("about")}>
+            About
           </button>
           <button className="logout-btn" onClick={() => supabase.auth.signOut()}>
             Log out
