@@ -334,6 +334,38 @@ body {
   cursor: not-allowed;
 }
 
+.photo-btn {
+  flex-shrink: 0;
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: #fff;
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.photo-btn:hover {
+  border-color: var(--maroon-soft);
+}
+
+.photo-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.image-error {
+  font-family: "Inter", sans-serif;
+  font-size: 0.8rem;
+  color: var(--maroon);
+  text-align: center;
+  padding: 0.4rem 1rem 0.8rem;
+  margin: 0;
+}
+
 /* --- Auth screen --- */
 
 .auth-screen {
