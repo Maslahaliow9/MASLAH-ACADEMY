@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { askQuestion, supabase } from "./lib/supabase.js";
+import { askQuestion, readImage, supabase } from "./lib/supabase.js";
 import Auth from "./Auth.jsx";
 import History from "./History.jsx";
 import About from "./About.jsx";
@@ -20,7 +20,11 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [readingImage, setReadingImage] = useState(false);
+  const [imageError, setImageError] = useState("");
   const scrollRef = useRef(null);
+  const cameraInputRef = useRef(null);
+  const uploadInputRef = useRef(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -65,6 +69,27 @@ export default function App() {
       console.error(err);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleImageFile(file) {
+    if (!file) return;
+    setImageError("");
+    setReadingImage(true);
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(",")[1]);
+        reader.onerror = () => reject(new Error("Could not read that file."));
+        reader.readAsDataURL(file);
+      });
+      const data = await readImage(base64, file.type || "image/jpeg");
+      setInput((prev) => (prev ? `${prev}\n${data.text}` : data.text));
+    } catch (err) {
+      console.error(err);
+      setImageError("Couldn't read that photo — please try again or type the question instead.");
+    } finally {
+      setReadingImage(false);
     }
   }
 
@@ -186,11 +211,51 @@ export default function App() {
           handleSubmit();
         }}
       >
+        <input
+          type="file"
+          accept="image/*"
+          capture="environment"
+          ref={cameraInputRef}
+          style={{ display: "none" }}
+          onChange={(e) => {
+            handleImageFile(e.target.files?.[0]);
+            e.target.value = "";
+          }}
+        />
+        <input
+          type="file"
+          accept="image/*"
+          ref={uploadInputRef}
+          style={{ display: "none" }}
+          onChange={(e) => {
+            handleImageFile(e.target.files?.[0]);
+            e.target.value = "";
+          }}
+        />
+        <button
+          type="button"
+          className="photo-btn"
+          title="Take a photo of a question"
+          disabled={readingImage}
+          onClick={() => cameraInputRef.current?.click()}
+        >
+          📷
+        </button>
+        <button
+          type="button"
+          className="photo-btn"
+          title="Upload a photo"
+          disabled={readingImage}
+          onClick={() => uploadInputRef.current?.click()}
+        >
+          🖼️
+        </button>
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={`Ask a question on ${book}...`}
+          placeholder={readingImage ? "Reading text from your photo…" : `Ask a question on ${book}...`}
           rows={1}
+          disabled={readingImage}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
@@ -198,10 +263,11 @@ export default function App() {
             }
           }}
         />
-        <button type="submit" disabled={loading || !input.trim()}>
+        <button type="submit" disabled={loading || readingImage || !input.trim()}>
           Ask
         </button>
       </form>
+      {imageError && <p className="image-error">{imageError}</p>}
     </div>
   );
 }
