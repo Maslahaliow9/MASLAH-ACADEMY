@@ -5,9 +5,9 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-export async function askQuestion(question, bookTitle) {
+export async function askQuestion(question, bookTitle, history = []) {
   const { data, error } = await supabase.functions.invoke("ask-question", {
-    body: { question, bookTitle },
+    body: { question, bookTitle, history },
   });
   if (error) throw error;
   return data;
