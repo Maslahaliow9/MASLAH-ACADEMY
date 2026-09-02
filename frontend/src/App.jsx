@@ -44,7 +44,15 @@ export default function App() {
     setMessages((m) => [...m, { role: "student", text: q, book: targetBook }]);
     setLoading(true);
     try {
-      const data = await askQuestion(q, targetBook);
+      // Send recent conversation so the AI can resolve follow-up
+      // questions about a passage pasted earlier without the
+      // student needing to repaste it every time.
+      const recentHistory = messages
+        .filter((m) => m.role === "student" || m.role === "assistant")
+        .slice(-6)
+        .map((m) => ({ role: m.role, text: m.text }));
+
+      const data = await askQuestion(q, targetBook, recentHistory);
       setMessages((m) => [
         ...m,
         { role: "assistant", text: data.answer, evidence: data.evidenceUsed, book: targetBook },
