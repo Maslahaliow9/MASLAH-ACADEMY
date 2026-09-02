@@ -13,7 +13,13 @@ export async function askQuestion(question, bookTitle, history = []) {
   return data;
 }
 
-export async function getHistory() {
+export async function readImage(base64Image, mimeType) {
+  const { data, error } = await supabase.functions.invoke("read-image", {
+    body: { image: base64Image, mimeType },
+  });
+  if (error) throw error;
+  return data;
+}
   // Row-level security already restricts this to the logged-in
   // student's own rows — no user_id filter needed here.
   const { data, error } = await supabase
