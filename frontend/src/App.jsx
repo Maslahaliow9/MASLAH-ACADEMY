@@ -4,7 +4,7 @@ import Auth from "./Auth.jsx";
 import History from "./History.jsx";
 import About from "./About.jsx";
 
-const BOOKS = ["The Samaritan", "Fathers of Nations"];
+const BOOKS = ["The Samaritan", "Fathers of Nations", "A Silent Song and Other Stories"];
 
 const STARTER_PROMPTS = [
   "Discuss the theme of betrayal.",
