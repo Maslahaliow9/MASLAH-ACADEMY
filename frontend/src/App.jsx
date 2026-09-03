@@ -77,13 +77,20 @@ export default function App() {
     setImageError("");
     setReadingImage(true);
     try {
+      // Phone camera photos are often several MB, which can exceed
+      // the edge function's request size limit once base64-encoded
+      // (roughly +33% larger) — silently causing the request to be
+      // dropped. Shrinking to a reasonable max dimension keeps the
+      // upload small and fast without hurting text readability.
+      const resizedBlob = await resizeImage(file, 1600, 0.75);
+
       const base64 = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result.split(",")[1]);
         reader.onerror = () => reject(new Error("Could not read that file."));
-        reader.readAsDataURL(file);
+        reader.readAsDataURL(resizedBlob);
       });
-      const data = await readImage(base64, file.type || "image/jpeg");
+      const data = await readImage(base64, "image/jpeg");
       setInput((prev) => (prev ? `${prev}\n${data.text}` : data.text));
     } catch (err) {
       console.error(err);
@@ -91,6 +98,49 @@ export default function App() {
     } finally {
       setReadingImage(false);
     }
+  }
+
+  // Resizes/compresses an image file down to a max dimension and
+  // JPEG quality, returning a Blob — keeps photo uploads small.
+  function resizeImage(file, maxDimension, quality) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const objectUrl = URL.createObjectURL(file);
+
+      img.onload = () => {
+        URL.revokeObjectURL(objectUrl);
+
+        let { width, height } = img;
+        if (width > maxDimension || height > maxDimension) {
+          if (width > height) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          } else {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+          }
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+
+        canvas.toBlob(
+          (blob) => (blob ? resolve(blob) : reject(new Error("Could not process that image."))),
+          "image/jpeg",
+          quality,
+        );
+      };
+
+      img.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        reject(new Error("Could not load that image."));
+      };
+
+      img.src = objectUrl;
+    });
   }
 
   // Still checking whether a session already exists (avoids a login-screen flash on reload)
