@@ -3,6 +3,7 @@ import { askQuestion, readImage, supabase } from "./lib/supabase.js";
 import Auth from "./Auth.jsx";
 import History from "./History.jsx";
 import About from "./About.jsx";
+import AccessGate from "./AccessGate.jsx";
 
 const BOOKS = ["The Samaritan", "Fathers of Nations", "A Silent Song and Other Stories"];
 
@@ -13,18 +14,41 @@ const STARTER_PROMPTS = [
   "Comment on the writer's use of irony.",
 ];
 
+const LOADING_MESSAGES = [
+  "Reading the evidence…",
+  "Checking the setbook…",
+  "Drafting the answer…",
+];
+
 export default function App() {
+  return (
+    <AccessGate>
+      <MaslahApp />
+    </AccessGate>
+  );
+}
+
+function MaslahApp() {
   const [session, setSession] = useState(undefined); // undefined = checking, null = logged out
   const [view, setView] = useState("chat"); // "chat" | "history" | "about"
   const [book, setBook] = useState(BOOKS[0]);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [readingImage, setReadingImage] = useState(false);
+  const [pendingImage, setPendingImage] = useState(null); // { previewUrl, base64, mimeType, source }
+  const [extracting, setExtracting] = useState(false);
   const [imageError, setImageError] = useState("");
   const scrollRef = useRef(null);
   const cameraInputRef = useRef(null);
   const uploadInputRef = useRef(null);
+  const textareaRef = useRef(null);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+  }, [input]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -38,14 +62,63 @@ export default function App() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, loading]);
 
+  const [loadingStep, setLoadingStep] = useState(0);
+
+  useEffect(() => {
+    if (!loading) {
+      setLoadingStep(0);
+      return;
+    }
+    const interval = setInterval(() => {
+      setLoadingStep((s) => (s + 1) % LOADING_MESSAGES.length);
+    }, 1800);
+    return () => clearInterval(interval);
+  }, [loading]);
+
   async function handleSubmit(question, questionBook) {
-    const q = (question ?? input).trim();
-    if (!q || loading) return;
+    if (loading || extracting) return;
+
+    const typed = (question ?? input).trim();
+    if (!typed && !pendingImage) return;
+
     const targetBook = questionBook ?? book;
     if (questionBook && questionBook !== book) setBook(questionBook);
     setView("chat");
+
+    const imageForBubble = pendingImage?.previewUrl ?? null;
+    let finalQuestion = typed;
+
+    // A photo is attached — transcribe it, then combine the extracted
+    // text with whatever the student wrote underneath (if anything)
+    // before sending the combined question onward as before.
+    if (pendingImage) {
+      setExtracting(true);
+      try {
+        const data = await readImage(pendingImage.base64, pendingImage.mimeType);
+        const extracted = data?.text?.trim();
+        finalQuestion = extracted
+          ? typed
+            ? `${extracted}\n\n${typed}`
+            : extracted
+          : typed;
+      } catch (err) {
+        console.error(err);
+        setExtracting(false);
+        setImageError("Couldn't read that photo — please try again, or remove it and type the question instead.");
+        return;
+      }
+      setExtracting(false);
+    }
+
+    if (!finalQuestion.trim()) return;
+
     setInput("");
-    setMessages((m) => [...m, { role: "student", text: q, book: targetBook }]);
+    setPendingImage(null);
+    setImageError("");
+    setMessages((m) => [
+      ...m,
+      { role: "student", text: typed, image: imageForBubble, book: targetBook },
+    ]);
     setLoading(true);
     try {
       // Send recent conversation so the AI can resolve follow-up
@@ -56,7 +129,7 @@ export default function App() {
         .slice(-6)
         .map((m) => ({ role: m.role, text: m.text }));
 
-      const data = await askQuestion(q, targetBook, recentHistory);
+      const data = await askQuestion(finalQuestion, targetBook, recentHistory);
       setMessages((m) => [
         ...m,
         { role: "assistant", text: data.answer, evidence: data.evidenceUsed, book: targetBook },
@@ -72,10 +145,12 @@ export default function App() {
     }
   }
 
-  async function handleImageFile(file) {
+  // Loads a chosen/captured photo into the preview card — no OCR yet.
+  // Transcription only happens once the student actually hits submit,
+  // so they get a chance to review, retake, remove, or annotate first.
+  async function handleImageFile(file, source) {
     if (!file) return;
     setImageError("");
-    setReadingImage(true);
     try {
       // Phone camera photos are often several MB, which can exceed
       // the edge function's request size limit once base64-encoded
@@ -83,6 +158,7 @@ export default function App() {
       // dropped. Shrinking to a reasonable max dimension keeps the
       // upload small and fast without hurting text readability.
       const resizedBlob = await resizeImage(file, 1600, 0.75);
+      const previewUrl = URL.createObjectURL(resizedBlob);
 
       const base64 = await new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -90,14 +166,30 @@ export default function App() {
         reader.onerror = () => reject(new Error("Could not read that file."));
         reader.readAsDataURL(resizedBlob);
       });
-      const data = await readImage(base64, "image/jpeg");
-      setInput((prev) => (prev ? `${prev}\n${data.text}` : data.text));
+
+      setPendingImage((prev) => {
+        if (prev?.previewUrl) URL.revokeObjectURL(prev.previewUrl);
+        return { previewUrl, base64, mimeType: "image/jpeg", source };
+      });
     } catch (err) {
       console.error(err);
-      setImageError("Couldn't read that photo — please try again or type the question instead.");
-    } finally {
-      setReadingImage(false);
+      setImageError("Couldn't load that photo — please try again.");
     }
+  }
+
+  function removeImage() {
+    setPendingImage((prev) => {
+      if (prev?.previewUrl) URL.revokeObjectURL(prev.previewUrl);
+      return null;
+    });
+    setImageError("");
+  }
+
+  function retakeImage() {
+    const source = pendingImage?.source;
+    removeImage();
+    if (source === "camera") cameraInputRef.current?.click();
+    else uploadInputRef.current?.click();
   }
 
   // Resizes/compresses an image file down to a max dimension and
@@ -192,6 +284,7 @@ export default function App() {
               className={`book-pill ${b === book ? "active" : ""}`}
               onClick={() => setBook(b)}
             >
+              <span className="book-pill-icon">{b[0]}</span>
               {b}
             </button>
           ))}
@@ -219,12 +312,26 @@ export default function App() {
 
         {messages.map((m, i) => (
           <div key={i} className={`bubble-row ${m.role}`}>
-            {m.role === "student" && <div className="bubble student">{m.text}</div>}
+            {m.role === "student" && (
+              <div className="bubble student">
+                {m.image && <img className="bubble-image" src={m.image} alt="Submitted question material" />}
+                {m.text && <div>{m.text}</div>}
+              </div>
+            )}
             {m.role === "error" && <div className="bubble error">{m.text}</div>}
             {m.role === "assistant" && (
               <div className="bubble assistant">
                 <div className="answer-label">Maslah AI — {m.book}</div>
-                <div className="answer-text">{m.text}</div>
+                <div className="answer-text">
+                  {m.text
+                    .split(/\n{2,}/)
+                    .filter((p) => p.trim())
+                    .map((paragraph, k) => (
+                      <p key={k} className="answer-paragraph">
+                        {paragraph}
+                      </p>
+                    ))}
+                </div>
                 {m.evidence?.length > 0 && (
                   <details className="evidence">
                     <summary>Evidence used ({m.evidence.length})</summary>
@@ -249,6 +356,7 @@ export default function App() {
               <span className="dot" />
               <span className="dot" />
               <span className="dot" />
+              <span className="loading-text">{LOADING_MESSAGES[loadingStep]}</span>
             </div>
           </div>
         )}
@@ -268,7 +376,7 @@ export default function App() {
           ref={cameraInputRef}
           style={{ display: "none" }}
           onChange={(e) => {
-            handleImageFile(e.target.files?.[0]);
+            handleImageFile(e.target.files?.[0], "camera");
             e.target.value = "";
           }}
         />
@@ -278,44 +386,68 @@ export default function App() {
           ref={uploadInputRef}
           style={{ display: "none" }}
           onChange={(e) => {
-            handleImageFile(e.target.files?.[0]);
+            handleImageFile(e.target.files?.[0], "upload");
             e.target.value = "";
           }}
         />
-        <button
-          type="button"
-          className="photo-btn"
-          title="Take a photo of a question"
-          disabled={readingImage}
-          onClick={() => cameraInputRef.current?.click()}
-        >
-          📷
-        </button>
-        <button
-          type="button"
-          className="photo-btn"
-          title="Upload a photo"
-          disabled={readingImage}
-          onClick={() => uploadInputRef.current?.click()}
-        >
-          🖼️
-        </button>
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder={readingImage ? "Reading text from your photo…" : `Ask a question on ${book}...`}
-          rows={1}
-          disabled={readingImage}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              handleSubmit();
+
+        {pendingImage && (
+          <div className="image-preview-card">
+            <img className="image-preview-thumb" src={pendingImage.previewUrl} alt="Selected question material" />
+            <div className="image-preview-actions">
+              <button type="button" className="image-preview-action" onClick={retakeImage} disabled={extracting}>
+                {pendingImage.source === "camera" ? "Retake" : "Replace"}
+              </button>
+              <button type="button" className="image-preview-action remove" onClick={removeImage} disabled={extracting}>
+                Remove
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="composer-row">
+          <button
+            type="button"
+            className="photo-btn"
+            title="Take a photo of a question"
+            disabled={extracting}
+            onClick={() => cameraInputRef.current?.click()}
+          >
+            📷
+          </button>
+          <button
+            type="button"
+            className="photo-btn"
+            title="Upload a photo"
+            disabled={extracting}
+            onClick={() => uploadInputRef.current?.click()}
+          >
+            🖼️
+          </button>
+          <textarea
+            ref={textareaRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder={
+              extracting
+                ? "Reading your photo…"
+                : pendingImage
+                ? "Add a note or instruction (optional)…"
+                : `Ask a question on ${book}...`
             }
-          }}
-        />
-        <button type="submit" disabled={loading || readingImage || !input.trim()}>
-          Ask
-        </button>
+            rows={1}
+            disabled={extracting}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSubmit();
+              }
+            }}
+          />
+          <button type="submit" disabled={loading || extracting || (!input.trim() && !pendingImage)}>
+            {extracting ? "Reading…" : "Ask"}
+          </button>
+        </div>
       </form>
       {imageError && <p className="image-error">{imageError}</p>}
     </div>
