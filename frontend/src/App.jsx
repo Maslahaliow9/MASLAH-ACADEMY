@@ -394,13 +394,23 @@ function MaslahApp() {
         {pendingImage && (
           <div className="image-preview-card">
             <img className="image-preview-thumb" src={pendingImage.previewUrl} alt="Selected question material" />
-            <div className="image-preview-actions">
-              <button type="button" className="image-preview-action" onClick={retakeImage} disabled={extracting}>
-                {pendingImage.source === "camera" ? "Retake" : "Replace"}
-              </button>
-              <button type="button" className="image-preview-action remove" onClick={removeImage} disabled={extracting}>
-                Remove
-              </button>
+            <div className="image-preview-meta">
+              <span className="image-preview-label">Photo attached</span>
+              <div className="image-preview-actions">
+                <button type="button" className="image-preview-action" onClick={retakeImage} disabled={extracting}>
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 12a9 9 0 1 1-3-6.7" />
+                    <polyline points="21 3 21 9 15 9" />
+                  </svg>
+                  {pendingImage.source === "camera" ? "Retake" : "Replace"}
+                </button>
+                <button type="button" className="image-preview-action remove" onClick={removeImage} disabled={extracting}>
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round">
+                    <path d="M6 6l12 12M18 6L6 18" />
+                  </svg>
+                  Remove
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -413,7 +423,10 @@ function MaslahApp() {
             disabled={extracting}
             onClick={() => cameraInputRef.current?.click()}
           >
-            📷
+            <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 8h3l1.4-2.1a1 1 0 0 1 .83-.44h5.54a1 1 0 0 1 .83.44L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z" />
+              <circle cx="12" cy="13.2" r="3.3" />
+            </svg>
           </button>
           <button
             type="button"
@@ -422,7 +435,11 @@ function MaslahApp() {
             disabled={extracting}
             onClick={() => uploadInputRef.current?.click()}
           >
-            🖼️
+            <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3.5" y="4.5" width="17" height="15" rx="2.2" />
+              <circle cx="8.7" cy="9.7" r="1.4" fill="currentColor" stroke="none" />
+              <path d="M20 15.2l-4.3-4.3a1.4 1.4 0 0 0-2 0L7 17.5" />
+            </svg>
           </button>
           <textarea
             ref={textareaRef}
