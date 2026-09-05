@@ -1,63 +1,67 @@
 /* Maslah Academy AI — design tokens
-   Palette: warm ivory + deep charcoal + a gilded gold accent.
+   Palette: warm ivory + deep forest ink + a burnished brass accent.
    (Variable names --ink / --maroon kept for minimal diff footprint —
-   --ink is now charcoal-black, --maroon is now the gold accent.)
+   --ink is now forest-black, --maroon is now the brass accent.)
    Type: Source Serif 4 (display/answers) + Inter (UI). */
 
 :root {
-  --ink: #201b16;
-  --ink-soft: #4a4136;
-  --parchment: #faf6ec;
-  --parchment-deep: #f0e8d4;
-  --maroon: #8a651a;
-  --maroon-soft: #d4a94d;
-  --danger: #b3452f;
-  --danger-soft: rgba(179, 69, 47, 0.35);
-  --line: #e2d9bd;
-  --text: #211d16;
-  --text-muted: #7a715c;
+  --ink: #14261f;
+  --ink-soft: #3c5148;
+  --parchment: #f7f4ea;
+  --parchment-deep: #ece4cd;
+  --maroon: #9c6423;
+  --maroon-soft: #d9a35c;
+  --danger: #a8402a;
+  --danger-soft: rgba(168, 64, 42, 0.35);
+  --line: #ddd6c0;
+  --text: #17201b;
+  --text-muted: #6c7266;
   --surface: #fff;
   --on-accent: #fff;
-  --accent-tint: #f8ecd2;
-  --accent-tint-border: rgba(138, 101, 26, 0.25);
+  --accent-rgb: 156, 100, 35;
+  --accent-hover: #7d501c;
+  --accent-tint: rgba(var(--accent-rgb), 0.12);
+  --accent-tint-border: rgba(var(--accent-rgb), 0.28);
   --glass-bg: rgba(255, 255, 255, 0.55);
   --glass-border: rgba(255, 255, 255, 0.6);
   --glass-bg-strong: rgba(255, 255, 255, 0.5);
   --glass-border-strong: rgba(255, 255, 255, 0.65);
-  --photo-hover-bg: #fbf3e0;
+  --photo-hover-bg: rgba(var(--accent-rgb), 0.1);
   --shimmer-highlight: #fff;
   --hero-gradient-start: #fff;
   --radius: 10px;
-  --shadow-tint: 32, 27, 22;
+  --shadow-tint: 20, 38, 31;
 }
 
-/* Dark mode — inverts to a deep charcoal-navy surface with the same
-   gold accent, brightened so it still pops against the dark ground.
+/* Dark mode — inverts to a deep forest-black surface with the same
+   brass accent, brightened so it still pops against the dark ground.
    Structural roles (page bg / card surface / solid-fill / accent /
    text) stay identical to light mode — only the values change. */
 html[data-theme="dark"] {
-  --ink: #d9b25c;
-  --ink-soft: #b9a385;
-  --parchment: #14141c;
-  --parchment-deep: #0d0d13;
-  --maroon: #e8c876;
-  --maroon-soft: #f3dfa0;
-  --danger: #e2705a;
-  --danger-soft: rgba(226, 112, 90, 0.35);
-  --line: #34313f;
-  --text: #ece7da;
-  --text-muted: #948d7d;
-  --surface: #1e1c26;
-  --on-accent: #14141c;
-  --accent-tint: rgba(212, 169, 77, 0.15);
-  --accent-tint-border: rgba(212, 169, 77, 0.3);
+  --ink: #d9a35c;
+  --ink-soft: #b7a688;
+  --parchment: #10160f;
+  --parchment-deep: #0a0f09;
+  --maroon: #e6bd78;
+  --maroon-soft: #f2dcae;
+  --danger: #d97a5c;
+  --danger-soft: rgba(217, 122, 92, 0.35);
+  --line: #2b332a;
+  --text: #ece7d8;
+  --text-muted: #948d78;
+  --surface: #1a211a;
+  --on-accent: #14261f;
+  --accent-rgb: 230, 189, 120;
+  --accent-hover: #f2dcae;
+  --accent-tint: rgba(var(--accent-rgb), 0.15);
+  --accent-tint-border: rgba(var(--accent-rgb), 0.3);
   --glass-bg: rgba(255, 255, 255, 0.04);
   --glass-border: rgba(255, 255, 255, 0.08);
   --glass-bg-strong: rgba(255, 255, 255, 0.05);
   --glass-border-strong: rgba(255, 255, 255, 0.1);
-  --photo-hover-bg: rgba(212, 169, 77, 0.12);
-  --shimmer-highlight: #2e2b38;
-  --hero-gradient-start: #1e1c26;
+  --photo-hover-bg: rgba(var(--accent-rgb), 0.12);
+  --shimmer-highlight: #232b21;
+  --hero-gradient-start: #1a211a;
   --shadow-tint: 0, 0, 0;
 }
 
@@ -138,16 +142,16 @@ body {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  box-shadow: 0 0 0 0 rgba(212, 169, 77, 0.5);
+  box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.5);
   animation: brand-glow 3.5s ease-in-out infinite;
 }
 
 @keyframes brand-glow {
   0%, 100% {
-    box-shadow: 0 0 0 0 rgba(212, 169, 77, 0.35);
+    box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.35);
   }
   50% {
-    box-shadow: 0 0 0 6px rgba(212, 169, 77, 0);
+    box-shadow: 0 0 0 6px rgba(var(--accent-rgb), 0);
   }
 }
 
@@ -202,6 +206,108 @@ body {
   margin: 0;
   font-size: 0.78rem;
   color: var(--text-muted);
+}
+
+.offline-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  font-family: "Inter", sans-serif;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #fff;
+  background: var(--danger);
+  padding: 0.5rem 1rem;
+  text-align: center;
+  animation: view-fade-in 0.25s ease;
+}
+
+.streak-toast {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-family: "Inter", sans-serif;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--on-accent);
+  background: var(--maroon);
+  padding: 0.55rem 1rem;
+  border-radius: 999px;
+  box-shadow: 0 6px 20px rgba(var(--shadow-tint), 0.25);
+  animation: toast-in 0.3s ease, toast-out 0.3s ease 4.1s forwards;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@keyframes toast-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+.onboarding-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.55rem 1.25rem;
+  background: var(--accent-tint);
+  border-bottom: 1px solid var(--accent-tint-border);
+  animation: view-fade-in 0.3s ease;
+}
+
+.onboarding-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+}
+
+.onboarding-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: "Inter", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--maroon);
+  white-space: nowrap;
+}
+
+.onboarding-dismiss {
+  flex-shrink: 0;
+  font-family: "Inter", sans-serif;
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 0.3rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent-tint-border);
+  background: transparent;
+  color: var(--maroon);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.onboarding-dismiss:hover {
+  background: rgba(var(--accent-rgb), 0.15);
 }
 
 .book-select-row {
@@ -454,6 +560,43 @@ body {
   border: 1px solid var(--maroon-soft);
 }
 
+.error-text {
+  margin: 0 0 0.5rem;
+}
+
+.error-text:last-child {
+  margin-bottom: 0;
+}
+
+.retry-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: "Inter", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--maroon);
+  background: var(--surface);
+  border: 1px solid var(--maroon-soft);
+  border-radius: 999px;
+  padding: 0.3rem 0.75rem;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.retry-btn:hover:not(:disabled) {
+  background: var(--photo-hover-bg);
+}
+
+.retry-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.retry-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .answer-toolbar {
   display: flex;
   align-items: center;
@@ -469,6 +612,16 @@ body {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--maroon);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.word-count {
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--text-muted);
 }
 
 .answer-actions {
@@ -627,16 +780,16 @@ body {
   color: var(--on-accent);
   cursor: pointer;
   transition: background 0.15s ease, transform 0.1s ease, box-shadow 0.2s ease;
-  box-shadow: 0 0 0 rgba(212, 169, 77, 0);
+  box-shadow: 0 0 0 rgba(var(--accent-rgb), 0);
 }
 
 .composer button:not(:disabled) {
-  box-shadow: 0 2px 12px rgba(212, 169, 77, 0.35);
+  box-shadow: 0 2px 12px rgba(var(--accent-rgb), 0.35);
 }
 
 .composer button:hover:not(:disabled) {
-  background: #6e4d14;
-  box-shadow: 0 2px 16px rgba(212, 169, 77, 0.5);
+  background: var(--accent-hover);
+  box-shadow: 0 2px 16px rgba(var(--accent-rgb), 0.5);
 }
 
 .composer button:active:not(:disabled) {
@@ -889,7 +1042,7 @@ body {
 }
 
 .auth-submit:hover:not(:disabled) {
-  background: #6e4d14;
+  background: var(--accent-hover);
 }
 
 .auth-submit:active:not(:disabled) {
@@ -1164,6 +1317,12 @@ body {
   margin-bottom: 0.9rem;
 }
 
+.overlay-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .overlay-header h3 {
   font-family: "Source Serif 4", serif;
   font-size: 1.15rem;
@@ -1201,6 +1360,24 @@ body {
   font-size: 0.88rem;
   color: var(--text-muted);
   line-height: 1.5;
+}
+
+.bookmark-search {
+  width: 100%;
+  font-family: "Inter", sans-serif;
+  font-size: 0.85rem;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  margin-bottom: 0.8rem;
+  transition: border-color 0.15s ease;
+}
+
+.bookmark-search:focus {
+  outline: none;
+  border-color: var(--maroon-soft);
 }
 
 .bookmark-list {
@@ -1245,6 +1422,26 @@ body {
 }
 
 @media (max-width: 500px) {
+  .offline-banner {
+    font-size: 0.74rem;
+    padding: 0.45rem 0.75rem;
+  }
+
+  .onboarding-banner {
+    padding: 0.5rem 0.85rem;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .onboarding-items {
+    justify-content: center;
+    gap: 0.6rem;
+  }
+
+  .onboarding-item {
+    font-size: 0.72rem;
+  }
+
   .app {
     border-left: none;
     border-right: none;
@@ -1305,5 +1502,53 @@ body {
     width: 16px;
     height: 16px;
     font-size: 0.62rem;
+  }
+}
+
+/* --- Print: only the saved-answers panel prints, styled as a clean
+   revision sheet on plain paper — everything else in the app hides. --- */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  #bookmark-print-area,
+  #bookmark-print-area * {
+    visibility: visible;
+  }
+
+  #bookmark-print-area {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    max-height: none;
+    max-width: none;
+    box-shadow: none;
+    border: none;
+    background: #fff;
+    color: #000;
+  }
+
+  .overlay-close,
+  .overlay-header-actions,
+  .bookmark-search {
+    display: none !important;
+  }
+
+  .bookmark-item {
+    border: 1px solid #ccc;
+    break-inside: avoid;
+    background: #fff;
+  }
+
+  .bookmark-book,
+  .bookmark-text {
+    color: #000 !important;
+  }
+
+  .bookmark-text {
+    -webkit-line-clamp: unset;
+    overflow: visible;
   }
 }
