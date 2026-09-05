@@ -23,6 +23,11 @@ const LOADING_MESSAGES = [
 const THEME_KEY = "maslah_theme";
 const STREAK_KEY = "maslah_streak";
 const BOOKMARKS_KEY = "maslah_bookmarks";
+const ONBOARDED_KEY = "maslah_onboarded";
+const STREAK_MILESTONE_KEY = "maslah_streak_milestone_seen";
+const STREAK_MILESTONES = [3, 7, 14, 30, 60, 100];
+const CHAT_SESSION_KEY = "maslah_chat_session";
+const MAX_PERSISTED_MESSAGES = 30;
 
 // A fixed, non-exam-answer prompt used only to populate the "About this
 // book" panel. This deliberately goes through the same AI pipeline that
@@ -43,7 +48,17 @@ function MaslahApp() {
   const [session, setSession] = useState(undefined); // undefined = checking, null = logged out
   const [view, setView] = useState("chat"); // "chat" | "history" | "about"
   const [book, setBook] = useState(BOOKS[0]);
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CHAT_SESSION_KEY) || "[]");
+      // Blob preview URLs from a prior session are already revoked by the
+      // browser on reload, so any restored student message that had a
+      // photo attached keeps its text but drops the (now-broken) image.
+      return saved.map((m) => (m.image ? { ...m, image: null } : m));
+    } catch {
+      return [];
+    }
+  });
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [pendingImage, setPendingImage] = useState(null); // { previewUrl, base64, mimeType, source }
@@ -62,6 +77,7 @@ function MaslahApp() {
     }
   });
   const [streak, setStreak] = useState(0);
+  const [streakToast, setStreakToast] = useState(null);
   const [bookmarks, setBookmarks] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem(BOOKMARKS_KEY) || "[]");
@@ -70,10 +86,41 @@ function MaslahApp() {
     }
   });
   const [showBookmarks, setShowBookmarks] = useState(false);
+  const [bookmarkQuery, setBookmarkQuery] = useState("");
   const [bookInfo, setBookInfo] = useState({}); // { [bookTitle]: { text, loading, error } }
   const [showBookInfo, setShowBookInfo] = useState(false);
   const [speakingIndex, setSpeakingIndex] = useState(null);
   const [copiedIndex, setCopiedIndex] = useState(null);
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+    try {
+      return !localStorage.getItem(ONBOARDED_KEY);
+    } catch {
+      return false;
+    }
+  });
+  const [isOffline, setIsOffline] = useState(() =>
+    typeof navigator !== "undefined" ? !navigator.onLine : false
+  );
+
+  useEffect(() => {
+    const goOffline = () => setIsOffline(true);
+    const goOnline = () => setIsOffline(false);
+    window.addEventListener("offline", goOffline);
+    window.addEventListener("online", goOnline);
+    return () => {
+      window.removeEventListener("offline", goOffline);
+      window.removeEventListener("online", goOnline);
+    };
+  }, []);
+
+  function dismissOnboarding() {
+    setShowOnboarding(false);
+    try {
+      localStorage.setItem(ONBOARDED_KEY, "true");
+    } catch {
+      // Storage unavailable — banner just won't be remembered as dismissed.
+    }
+  }
 
   // Theme: persist choice and apply it to the document root so CSS
   // variables can be swapped in one place.
@@ -93,13 +140,26 @@ function MaslahApp() {
     try {
       const today = new Date().toDateString();
       const saved = JSON.parse(localStorage.getItem(STREAK_KEY) || "null");
+
+      const applyStreak = (count) => {
+        setStreak(count);
+        if (STREAK_MILESTONES.includes(count)) {
+          const lastSeen = Number(localStorage.getItem(STREAK_MILESTONE_KEY) || 0);
+          if (count > lastSeen) {
+            localStorage.setItem(STREAK_MILESTONE_KEY, String(count));
+            setStreakToast(count);
+            setTimeout(() => setStreakToast(null), 4500);
+          }
+        }
+      };
+
       if (!saved) {
         localStorage.setItem(STREAK_KEY, JSON.stringify({ lastDate: today, count: 1 }));
-        setStreak(1);
+        applyStreak(1);
         return;
       }
       if (saved.lastDate === today) {
-        setStreak(saved.count);
+        applyStreak(saved.count);
         return;
       }
       const yesterday = new Date();
@@ -107,7 +167,7 @@ function MaslahApp() {
       const isConsecutive = saved.lastDate === yesterday.toDateString();
       const nextCount = isConsecutive ? saved.count + 1 : 1;
       localStorage.setItem(STREAK_KEY, JSON.stringify({ lastDate: today, count: nextCount }));
-      setStreak(nextCount);
+      applyStreak(nextCount);
     } catch {
       setStreak(0);
     }
@@ -131,6 +191,33 @@ function MaslahApp() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, loading]);
+
+  // Persist the visible conversation so a refresh or accidental tab
+  // close doesn't wipe an in-progress study session. Only the last
+  // MAX_PERSISTED_MESSAGES are kept, and blob image URLs are dropped
+  // since they wouldn't survive a reload anyway.
+  useEffect(() => {
+    try {
+      const toStore = messages.slice(-MAX_PERSISTED_MESSAGES).map((m) => {
+        if (!m.image) return m;
+        const { image, ...rest } = m;
+        return rest;
+      });
+      localStorage.setItem(CHAT_SESSION_KEY, JSON.stringify(toStore));
+    } catch {
+      // Storage unavailable or full — the live session still works,
+      // it just won't survive a reload.
+    }
+  }, [messages]);
+
+  function clearConversation() {
+    setMessages([]);
+    try {
+      localStorage.removeItem(CHAT_SESSION_KEY);
+    } catch {
+      // Storage unavailable — clearing in-memory state is still enough.
+    }
+  }
 
   const [loadingStep, setLoadingStep] = useState(0);
 
@@ -207,12 +294,22 @@ function MaslahApp() {
     } catch (err) {
       setMessages((m) => [
         ...m,
-        { role: "error", text: "Something went wrong retrieving that answer. Please try again.", book: targetBook },
+        {
+          role: "error",
+          text: "Something went wrong retrieving that answer. Please try again.",
+          book: targetBook,
+          retryQuestion: finalQuestion,
+        },
       ]);
       console.error(err);
     } finally {
       setLoading(false);
     }
+  }
+
+  function retryFailedMessage(message) {
+    if (!message.retryQuestion) return;
+    handleSubmit(message.retryQuestion, message.book);
   }
 
   // Loads a chosen/captured photo into the preview card — no OCR yet.
@@ -450,6 +547,21 @@ function MaslahApp() {
               <path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1Z" />
             </svg>
           </button>
+          {messages.length > 0 && (
+            <button
+              className="icon-toggle-btn"
+              title="Clear this conversation"
+              onClick={() => {
+                if (window.confirm("Clear this conversation? Saved bookmarks won't be affected.")) {
+                  clearConversation();
+                }
+              }}
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4.5 7h15M9.5 7V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2M18 7l-.7 12.1a1.5 1.5 0 0 1-1.5 1.4H8.2a1.5 1.5 0 0 1-1.5-1.4L6 7" />
+              </svg>
+            </button>
+          )}
           <button className="history-btn" onClick={() => setView("history")}>
             History
           </button>
@@ -481,6 +593,55 @@ function MaslahApp() {
           </button>
         </div>
       </header>
+
+      {isOffline && (
+        <div className="offline-banner">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 8.5c5-4 13-4 18 0M6.5 12c3.3-2.7 7.7-2.7 11 0M10 15.5c1.3-1 2.7-1 4 0" />
+            <path d="M12 19v.01" />
+            <path d="M3 3l18 18" />
+          </svg>
+          You're offline — questions can't be sent until your connection is back.
+        </div>
+      )}
+
+      {streakToast && (
+        <div className="streak-toast">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+            <path d="M12 2c1 3-1 4.5-2 6-1.3 2-2 3.6-2 5.5A4.5 4.5 0 0 0 12 18a4.5 4.5 0 0 0 4-6.5c1 .8 1.5 2 1.5 3A5.5 5.5 0 0 1 12 20a6.5 6.5 0 0 1-6.5-6.5C5.5 9 8 6.5 9.5 4.5 10.3 3.5 11 2.8 12 2Z" />
+          </svg>
+          <span>{streakToast}-day streak — keep it going</span>
+        </div>
+      )}
+
+      {showOnboarding && (
+        <div className="onboarding-banner">
+          <div className="onboarding-items">
+            <span className="onboarding-item">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round">
+                <path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1Z" />
+              </svg>
+              Save answers for revision
+            </span>
+            <span className="onboarding-item">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="9.2" />
+                <path d="M12 11v5.5M12 8v.01" />
+              </svg>
+              Get a setbook overview
+            </span>
+            <span className="onboarding-item">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z" />
+              </svg>
+              Switch to dark mode
+            </span>
+          </div>
+          <button className="onboarding-dismiss" onClick={dismissOnboarding}>
+            Got it
+          </button>
+        </div>
+      )}
 
       <main className="chat" ref={scrollRef}>
         {messages.length === 0 && (
@@ -515,11 +676,34 @@ function MaslahApp() {
                 {m.text && <div>{m.text}</div>}
               </div>
             )}
-            {m.role === "error" && <div className="bubble error">{m.text}</div>}
+            {m.role === "error" && (
+              <div className="bubble error">
+                <p className="error-text">{m.text}</p>
+                {m.retryQuestion && (
+                  <button
+                    type="button"
+                    className="retry-btn"
+                    disabled={loading || extracting || isOffline}
+                    onClick={() => retryFailedMessage(m)}
+                  >
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 12a9 9 0 1 1-3-6.7" />
+                      <polyline points="21 3 21 9 15 9" />
+                    </svg>
+                    Retry
+                  </button>
+                )}
+              </div>
+            )}
             {m.role === "assistant" && (
               <div className="bubble assistant">
                 <div className="answer-toolbar">
-                  <div className="answer-label">Maslah AI — {m.book}</div>
+                  <div className="answer-label">
+                    Maslah AI — {m.book}
+                    <span className="word-count">
+                      {m.text.trim().split(/\s+/).filter(Boolean).length} words
+                    </span>
+                  </div>
                   <div className="answer-actions">
                     <button
                       type="button"
@@ -665,7 +849,7 @@ function MaslahApp() {
             type="button"
             className="photo-btn"
             title="Take a photo of a question"
-            disabled={extracting}
+            disabled={extracting || isOffline}
             onClick={() => cameraInputRef.current?.click()}
           >
             <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -678,7 +862,7 @@ function MaslahApp() {
             type="button"
             className="photo-btn"
             title="Upload a photo"
-            disabled={extracting}
+            disabled={extracting || isOffline}
             onClick={() => uploadInputRef.current?.click()}
           >
             <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -707,7 +891,7 @@ function MaslahApp() {
               }
             }}
           />
-          <button type="submit" disabled={loading || extracting || (!input.trim() && !pendingImage)}>
+          <button type="submit" disabled={loading || extracting || isOffline || (!input.trim() && !pendingImage)}>
             {extracting ? "Reading…" : "Ask"}
           </button>
         </div>
@@ -717,33 +901,67 @@ function MaslahApp() {
 
       {showBookmarks && (
         <div className="overlay" onClick={() => setShowBookmarks(false)}>
-          <div className="overlay-panel" onClick={(e) => e.stopPropagation()}>
+          <div className="overlay-panel" id="bookmark-print-area" onClick={(e) => e.stopPropagation()}>
             <div className="overlay-header">
               <h3>Saved answers</h3>
-              <button className="overlay-close" onClick={() => setShowBookmarks(false)}>
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                  <path d="M6 6l12 12M18 6L6 18" />
-                </svg>
-              </button>
+              <div className="overlay-header-actions">
+                {bookmarks.length > 0 && (
+                  <button className="overlay-close" title="Print for revision" onClick={() => window.print()}>
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M6 9V3.5h12V9M6 18h12v3.5H6V18Z" />
+                      <path d="M6 14h12M4.5 9h15a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H18M6 16H4.5a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1" />
+                    </svg>
+                  </button>
+                )}
+                <button className="overlay-close" onClick={() => setShowBookmarks(false)}>
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                    <path d="M6 6l12 12M18 6L6 18" />
+                  </svg>
+                </button>
+              </div>
             </div>
             {bookmarks.length === 0 ? (
               <p className="overlay-empty">No saved answers yet. Tap the bookmark icon on any answer to save it here for revision.</p>
             ) : (
-              <div className="bookmark-list">
-                {bookmarks.map((b, i) => (
-                  <div className="bookmark-item" key={i}>
-                    <div className="bookmark-item-header">
-                      <span className="bookmark-book">{b.book}</span>
-                      <button className="overlay-close small" onClick={() => removeBookmark(b)} title="Remove">
-                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                          <path d="M6 6l12 12M18 6L6 18" />
-                        </svg>
-                      </button>
+              <>
+                {bookmarks.length > 3 && (
+                  <input
+                    type="text"
+                    className="bookmark-search"
+                    placeholder="Search saved answers…"
+                    value={bookmarkQuery}
+                    onChange={(e) => setBookmarkQuery(e.target.value)}
+                  />
+                )}
+                {(() => {
+                  const q = bookmarkQuery.trim().toLowerCase();
+                  const filtered = q
+                    ? bookmarks.filter(
+                        (b) => b.text.toLowerCase().includes(q) || b.book.toLowerCase().includes(q)
+                      )
+                    : bookmarks;
+                  if (filtered.length === 0) {
+                    return <p className="overlay-empty">No saved answers match "{bookmarkQuery}".</p>;
+                  }
+                  return (
+                    <div className="bookmark-list">
+                      {filtered.map((b, i) => (
+                        <div className="bookmark-item" key={i}>
+                          <div className="bookmark-item-header">
+                            <span className="bookmark-book">{b.book}</span>
+                            <button className="overlay-close small" onClick={() => removeBookmark(b)} title="Remove">
+                              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                                <path d="M6 6l12 12M18 6L6 18" />
+                              </svg>
+                            </button>
+                          </div>
+                          <p className="bookmark-text">{b.text}</p>
+                        </div>
+                      ))}
                     </div>
-                    <p className="bookmark-text">{b.text}</p>
-                  </div>
-                ))}
-              </div>
+                  );
+                })()}
+              </>
             )}
           </div>
         </div>
