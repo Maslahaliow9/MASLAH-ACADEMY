@@ -668,9 +668,10 @@ function MaslahApp() {
             disabled={extracting}
             onClick={() => cameraInputRef.current?.click()}
           >
-            <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M4 8h3l1.4-2.1a1 1 0 0 1 .83-.44h5.54a1 1 0 0 1 .83.44L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z" />
-              <circle cx="12" cy="13.2" r="3.3" />
+            <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 8.5h2.7l1.3-2a1.3 1.3 0 0 1 1.1-.6h5.8a1.3 1.3 0 0 1 1.1.6l1.3 2H20a1 1 0 0 1 1 1v9.2a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9.5a1 1 0 0 1 1-1Z" />
+              <circle cx="12" cy="14" r="3.7" />
+              <path d="M16.2 8.7h1.3" />
             </svg>
           </button>
           <button
@@ -680,10 +681,10 @@ function MaslahApp() {
             disabled={extracting}
             onClick={() => uploadInputRef.current?.click()}
           >
-            <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3.5" y="4.5" width="17" height="15" rx="2.2" />
-              <circle cx="8.7" cy="9.7" r="1.4" fill="currentColor" stroke="none" />
-              <path d="M20 15.2l-4.3-4.3a1.4 1.4 0 0 0-2 0L7 17.5" />
+            <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3.3" y="4.3" width="17.4" height="15.4" rx="2.4" />
+              <circle cx="8.3" cy="9" r="1.7" fill="currentColor" stroke="none" />
+              <path d="M4.3 16.8l4.6-4.9 3.3 3.4 2.9-3.1 4.6 4.6" />
             </svg>
           </button>
           <textarea
