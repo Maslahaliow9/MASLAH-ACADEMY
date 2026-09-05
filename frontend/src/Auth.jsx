@@ -5,6 +5,7 @@ export default function Auth({ onAuthed }) {
   const [mode, setMode] = useState("login"); // "login" | "signup"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [accessCode, setAccessCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -17,15 +18,25 @@ export default function Auth({ onAuthed }) {
       setError("Please enter your email and password.");
       return;
     }
+    if (mode === "signup" && !accessCode.trim()) {
+      setError("Please enter your access code.");
+      return;
+    }
     setLoading(true);
     try {
       if (mode === "signup") {
-        const { error: signUpError } = await supabase.auth.signUp({
+        const { data, error: signUpError } = await supabase.functions.invoke("signup", {
+          body: { email: email.trim(), password, accessCode: accessCode.trim() },
+        });
+        if (signUpError) throw signUpError;
+        if (data?.error) throw new Error(data.error);
+
+        // Account created — now actually log them in.
+        const { error: signInError } = await supabase.auth.signInWithPassword({
           email: email.trim(),
           password,
         });
-        if (signUpError) throw signUpError;
-        setNotice("Account created — you're now signed in.");
+        if (signInError) throw signInError;
       } else {
         const { error: signInError } = await supabase.auth.signInWithPassword({
           email: email.trim(),
@@ -98,6 +109,19 @@ export default function Auth({ onAuthed }) {
               autoComplete={mode === "signup" ? "new-password" : "current-password"}
             />
           </label>
+
+          {mode === "signup" && (
+            <label>
+              Access code
+              <input
+                type="text"
+                value={accessCode}
+                onChange={(e) => setAccessCode(e.target.value)}
+                placeholder="Provided by Maslah Academy AI"
+                autoComplete="off"
+              />
+            </label>
+          )}
 
           {error && <p className="auth-error">{error}</p>}
           {notice && <p className="auth-notice">{notice}</p>}
