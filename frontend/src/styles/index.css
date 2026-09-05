@@ -652,12 +652,12 @@ body {
 
 .photo-btn {
   flex-shrink: 0;
-  width: 42px;
-  height: 42px;
-  border-radius: var(--radius);
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
   border: 1px solid var(--line);
-  background: var(--surface);
-  color: var(--ink-soft);
+  background: var(--accent-tint);
+  color: var(--maroon);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -667,7 +667,6 @@ body {
 
 .photo-btn:hover:not(:disabled) {
   border-color: var(--maroon-soft);
-  color: var(--maroon);
   background: var(--photo-hover-bg);
 }
 
