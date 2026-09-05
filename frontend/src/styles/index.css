@@ -1,25 +1,25 @@
 /* Maslah Academy AI — design tokens
-   Palette: warm ivory + deep forest ink + a burnished brass accent.
+   Palette: rich green page background + a vivid pink accent.
    (Variable names --ink / --maroon kept for minimal diff footprint —
-   --ink is now forest-black, --maroon is now the brass accent.)
+   --ink is now a deep rose solid-fill, --maroon is the pink accent.)
    Type: Source Serif 4 (display/answers) + Inter (UI). */
 
 :root {
-  --ink: #14261f;
-  --ink-soft: #3c5148;
-  --parchment: #f7f4ea;
-  --parchment-deep: #ece4cd;
-  --maroon: #9c6423;
-  --maroon-soft: #d9a35c;
-  --danger: #a8402a;
-  --danger-soft: rgba(168, 64, 42, 0.35);
-  --line: #ddd6c0;
-  --text: #17201b;
-  --text-muted: #6c7266;
-  --surface: #fff;
+  --ink: #c2477e;
+  --ink-soft: #55705f;
+  --parchment: #1c5c42;
+  --parchment-deep: #123625;
+  --maroon: #d6447e;
+  --maroon-soft: #f2a8c5;
+  --danger: #c23c3c;
+  --danger-soft: rgba(194, 60, 60, 0.35);
+  --line: #d8e5dc;
+  --text: #1c2b23;
+  --text-muted: #5f7568;
+  --surface: #fef6f9;
   --on-accent: #fff;
-  --accent-rgb: 156, 100, 35;
-  --accent-hover: #7d501c;
+  --accent-rgb: 214, 68, 126;
+  --accent-hover: #a8305f;
   --accent-tint: rgba(var(--accent-rgb), 0.12);
   --accent-tint-border: rgba(var(--accent-rgb), 0.28);
   --glass-bg: rgba(255, 255, 255, 0.55);
@@ -28,31 +28,30 @@
   --glass-border-strong: rgba(255, 255, 255, 0.65);
   --photo-hover-bg: rgba(var(--accent-rgb), 0.1);
   --shimmer-highlight: #fff;
-  --hero-gradient-start: #fff;
+  --hero-gradient-start: #fef6f9;
   --radius: 10px;
-  --shadow-tint: 20, 38, 31;
+  --shadow-tint: 8, 26, 18;
 }
 
-/* Dark mode — inverts to a deep forest-black surface with the same
-   brass accent, brightened so it still pops against the dark ground.
-   Structural roles (page bg / card surface / solid-fill / accent /
-   text) stay identical to light mode — only the values change. */
+/* Dark mode — an even deeper near-black green, with the pink accent
+   brightened so it still pops against the darker ground. Structural
+   roles stay identical to light mode — only the values change. */
 html[data-theme="dark"] {
-  --ink: #d9a35c;
-  --ink-soft: #b7a688;
-  --parchment: #10160f;
-  --parchment-deep: #0a0f09;
-  --maroon: #e6bd78;
-  --maroon-soft: #f2dcae;
-  --danger: #d97a5c;
-  --danger-soft: rgba(217, 122, 92, 0.35);
-  --line: #2b332a;
-  --text: #ece7d8;
-  --text-muted: #948d78;
-  --surface: #1a211a;
-  --on-accent: #14261f;
-  --accent-rgb: 230, 189, 120;
-  --accent-hover: #f2dcae;
+  --ink: #e8799f;
+  --ink-soft: #b98fa0;
+  --parchment: #0a1a13;
+  --parchment-deep: #061109;
+  --maroon: #f7bdd4;
+  --maroon-soft: #fbdce9;
+  --danger: #e8685a;
+  --danger-soft: rgba(232, 104, 90, 0.35);
+  --line: #1f3a2c;
+  --text: #eef2ec;
+  --text-muted: #8fa695;
+  --surface: #0f2419;
+  --on-accent: #0a1a13;
+  --accent-rgb: 232, 121, 159;
+  --accent-hover: #fbdce9;
   --accent-tint: rgba(var(--accent-rgb), 0.15);
   --accent-tint-border: rgba(var(--accent-rgb), 0.3);
   --glass-bg: rgba(255, 255, 255, 0.04);
@@ -60,8 +59,8 @@ html[data-theme="dark"] {
   --glass-bg-strong: rgba(255, 255, 255, 0.05);
   --glass-border-strong: rgba(255, 255, 255, 0.1);
   --photo-hover-bg: rgba(var(--accent-rgb), 0.12);
-  --shimmer-highlight: #232b21;
-  --hero-gradient-start: #1a211a;
+  --shimmer-highlight: #16301f;
+  --hero-gradient-start: #0f2419;
   --shadow-tint: 0, 0, 0;
 }
 
