@@ -46,6 +46,9 @@ export default function App() {
 
 function MaslahApp() {
   const [session, setSession] = useState(undefined); // undefined = checking, null = logged out
+  // undefined = checking, null = no approval row (grandfathered/legacy
+  // account, treated as approved), object = { approved, code }
+  const [approval, setApproval] = useState(undefined);
   const [view, setView] = useState("chat"); // "chat" | "history" | "about"
   const [book, setBook] = useState(BOOKS[0]);
   const [messages, setMessages] = useState(() => {
@@ -187,6 +190,38 @@ function MaslahApp() {
     });
     return () => listener.subscription.unsubscribe();
   }, []);
+
+  // Every account created through signup gets an approval_requests
+  // row that starts unapproved. Accounts that existed before this
+  // system was added have no row at all — those are treated as
+  // already approved (grandfathered in) rather than locked out.
+  async function checkApproval(userId) {
+    try {
+      const { data, error } = await supabase
+        .from("approval_requests")
+        .select("approved, code")
+        .eq("user_id", userId)
+        .maybeSingle();
+      if (error) throw error;
+      setApproval(data ?? null);
+    } catch (err) {
+      console.error(err);
+      // If the check itself fails (network hiccup, etc.), don't trap
+      // an already-approved student behind a broken gate — treat as
+      // approved and let them in; the real gate is server-side at
+      // signup/approve-request, this is just a UI convenience.
+      setApproval(null);
+    }
+  }
+
+  useEffect(() => {
+    if (session === undefined) return;
+    if (!session) {
+      setApproval(undefined);
+      return;
+    }
+    checkApproval(session.user.id);
+  }, [session]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -481,6 +516,51 @@ function MaslahApp() {
     return (
       <div className="view-fade">
         <Auth onAuthed={() => {}} />
+      </div>
+    );
+  }
+
+  // Logged in, but still checking (or waiting on) approval status
+  if (approval === undefined) {
+    return <div className="auth-screen" />;
+  }
+
+  if (approval && approval.approved === false) {
+    return (
+      <div className="view-fade">
+        <div className="auth-screen">
+          <div className="auth-card">
+            <div className="brand">
+              <span className="brand-mark">M</span>
+              <div>
+                <h1>Maslah Academy AI</h1>
+                <p className="tagline">Evidence-based KCSE setbook answers</p>
+              </div>
+            </div>
+
+            <p className="access-intro">
+              Your account has been created but hasn't been approved yet. Share this
+              review code with your teacher or admin so they can approve your access.
+            </p>
+
+            <div className="review-code-display">{approval.code}</div>
+
+            <button
+              type="button"
+              className="auth-submit"
+              onClick={() => checkApproval(session.user.id)}
+            >
+              I've been approved — check again
+            </button>
+            <button
+              type="button"
+              className="pending-logout"
+              onClick={() => supabase.auth.signOut()}
+            >
+              Log out
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
