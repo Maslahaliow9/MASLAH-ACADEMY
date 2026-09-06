@@ -1,11 +1,10 @@
 import { useState } from "react";
 import { supabase } from "./lib/supabase.js";
 
-export default function Auth({ onAuthed }) {
+export default function Auth({ onAuthed, onPendingApproval }) {
   const [mode, setMode] = useState("login"); // "login" | "signup"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [accessCode, setAccessCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -18,33 +17,32 @@ export default function Auth({ onAuthed }) {
       setError("Please enter your email and password.");
       return;
     }
-    if (mode === "signup" && !accessCode.trim()) {
-      setError("Please enter your access code.");
-      return;
-    }
     setLoading(true);
     try {
       if (mode === "signup") {
         const { data, error: signUpError } = await supabase.functions.invoke("signup", {
-          body: { email: email.trim(), password, accessCode: accessCode.trim() },
+          body: { email: email.trim(), password },
         });
         if (signUpError) throw signUpError;
         if (data?.error) throw new Error(data.error);
 
-        // Account created — now actually log them in.
+        // Account created — now log them in, but the app will show
+        // a "pending approval" screen until the founder approves
+        // their code.
         const { error: signInError } = await supabase.auth.signInWithPassword({
           email: email.trim(),
           password,
         });
         if (signInError) throw signInError;
+        onPendingApproval?.(data.code);
       } else {
         const { error: signInError } = await supabase.auth.signInWithPassword({
           email: email.trim(),
           password,
         });
         if (signInError) throw signInError;
+        onAuthed?.();
       }
-      onAuthed?.();
     } catch (err) {
       setError(err.message || "Something went wrong. Please try again.");
     } finally {
@@ -111,16 +109,9 @@ export default function Auth({ onAuthed }) {
           </label>
 
           {mode === "signup" && (
-            <label>
-              Access code
-              <input
-                type="text"
-                value={accessCode}
-                onChange={(e) => setAccessCode(e.target.value)}
-                placeholder="Provided by Maslah Academy AI"
-                autoComplete="off"
-              />
-            </label>
+            <p className="auth-notice" style={{ marginTop: "-0.3rem" }}>
+              After creating your account, you'll get a code to send to the founder for approval before you can start asking questions.
+            </p>
           )}
 
           {error && <p className="auth-error">{error}</p>}
