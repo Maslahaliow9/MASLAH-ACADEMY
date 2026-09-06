@@ -3,9 +3,21 @@ import { askQuestion, readImage, supabase } from "./lib/supabase.js";
 import Auth from "./Auth.jsx";
 import History from "./History.jsx";
 import About from "./About.jsx";
-import AccessGate from "./AccessGate.jsx";
+import AccessGate, { hasAccess } from "./AccessGate.jsx";
+import PendingApproval from "./PendingApproval.jsx";
 
 const BOOKS = ["The Samaritan", "Fathers of Nations", "A Silent Song and Other Stories"];
+
+// General-knowledge subjects — answered from the AI's own knowledge,
+// not from an ingested book. Kept as a separate list from BOOKS so
+// the UI can group and label them honestly as not evidence-based.
+const SUBJECTS = [
+  "Chemistry", "Biology", "Physics", "Mathematics", "History",
+  "Geography", "Business", "English", "Kiswahili", "Arabic",
+  "IRE", "CRE", "HRE",
+];
+
+const HIGHER_RISK_SUBJECTS = ["Kiswahili", "Arabic", "IRE", "CRE", "HRE"];
 
 const STARTER_PROMPTS = [
   "Discuss the theme of betrayal.",
@@ -14,49 +26,44 @@ const STARTER_PROMPTS = [
   "Comment on the writer's use of irony.",
 ];
 
+const GENERAL_STARTER_PROMPTS = [
+  "Explain a key concept from this topic.",
+  "Give a worked example.",
+  "What are the most commonly examined points here?",
+  "Summarize this for quick revision.",
+];
+
 const LOADING_MESSAGES = [
   "Reading the evidence…",
-  "Checking the setbook…",
+  "Working through it…",
   "Drafting the answer…",
 ];
 
 const THEME_KEY = "maslah_theme";
 const STREAK_KEY = "maslah_streak";
-const BOOKMARKS_KEY = "maslah_bookmarks";
-const ONBOARDED_KEY = "maslah_onboarded";
 const STREAK_MILESTONE_KEY = "maslah_streak_milestone_seen";
 const STREAK_MILESTONES = [3, 7, 14, 30, 60, 100];
+const BOOKMARKS_KEY = "maslah_bookmarks";
+const ONBOARDED_KEY = "maslah_onboarded";
 const CHAT_SESSION_KEY = "maslah_chat_session";
 const MAX_PERSISTED_MESSAGES = 30;
 
 // A fixed, non-exam-answer prompt used only to populate the "About this
-// book" panel. This deliberately goes through the same AI pipeline that
-// answers every other question, so the facts it returns are grounded in
-// the same setbook evidence — never facts invented client-side.
+// book" panel — grounded in the same setbook evidence as every other
+// answer, never facts invented client-side.
 const BOOK_INFO_PROMPT =
   "Give a brief, spoiler-light overview of the main characters and central themes of this setbook, in about 120 words, as plain flowing text with no headings.";
 
 export default function App() {
-  return (
-    <AccessGate>
-      <MaslahApp />
-    </AccessGate>
-  );
-}
-
-function MaslahApp() {
+  const [granted, setGranted] = useState(hasAccess());
   const [session, setSession] = useState(undefined); // undefined = checking, null = logged out
-  // undefined = checking, null = no approval row (grandfathered/legacy
-  // account, treated as approved), object = { approved, code }
-  const [approval, setApproval] = useState(undefined);
+  const [approvalStatus, setApprovalStatus] = useState(undefined); // undefined = checking, "pending" | "approved" | null (no request found)
+  const [pendingCode, setPendingCode] = useState(null);
   const [view, setView] = useState("chat"); // "chat" | "history" | "about"
   const [book, setBook] = useState(BOOKS[0]);
   const [messages, setMessages] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(CHAT_SESSION_KEY) || "[]");
-      // Blob preview URLs from a prior session are already revoked by the
-      // browser on reload, so any restored student message that had a
-      // photo attached keeps its text but drops the (now-broken) image.
       return saved.map((m) => (m.image ? { ...m, image: null } : m));
     } catch {
       return [];
@@ -64,9 +71,6 @@ function MaslahApp() {
   });
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [pendingImage, setPendingImage] = useState(null); // { previewUrl, base64, mimeType, source }
-  const [extracting, setExtracting] = useState(false);
-  const [imageError, setImageError] = useState("");
   const scrollRef = useRef(null);
   const cameraInputRef = useRef(null);
   const uploadInputRef = useRef(null);
@@ -90,7 +94,7 @@ function MaslahApp() {
   });
   const [showBookmarks, setShowBookmarks] = useState(false);
   const [bookmarkQuery, setBookmarkQuery] = useState("");
-  const [bookInfo, setBookInfo] = useState({}); // { [bookTitle]: { text, loading, error } }
+  const [bookInfo, setBookInfo] = useState({});
   const [showBookInfo, setShowBookInfo] = useState(false);
   const [speakingIndex, setSpeakingIndex] = useState(null);
   const [copiedIndex, setCopiedIndex] = useState(null);
@@ -104,29 +108,76 @@ function MaslahApp() {
   const [isOffline, setIsOffline] = useState(() =>
     typeof navigator !== "undefined" ? !navigator.onLine : false
   );
+  const [loadingStep, setLoadingStep] = useState(0);
 
   useEffect(() => {
-    const goOffline = () => setIsOffline(true);
-    const goOnline = () => setIsOffline(false);
-    window.addEventListener("offline", goOffline);
-    window.addEventListener("online", goOnline);
-    return () => {
-      window.removeEventListener("offline", goOffline);
-      window.removeEventListener("online", goOnline);
-    };
+    if (!loading) {
+      setLoadingStep(0);
+      return;
+    }
+    const interval = setInterval(() => {
+      setLoadingStep((s) => (s + 1) % LOADING_MESSAGES.length);
+    }, 1800);
+    return () => clearInterval(interval);
+  }, [loading]);
+
+  // Image capture/upload flow: a photo is staged for preview and
+  // captioning before it's actually submitted, rather than firing
+  // off the moment it's picked.
+  const [pendingImage, setPendingImage] = useState(null); // { dataUrl, blob } | null
+  const [extractedText, setExtractedText] = useState("");
+  const [imageCaption, setImageCaption] = useState("");
+  const [extracting, setExtracting] = useState(false);
+  const [imageError, setImageError] = useState("");
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => listener.subscription.unsubscribe();
   }, []);
 
-  function dismissOnboarding() {
-    setShowOnboarding(false);
-    try {
-      localStorage.setItem(ONBOARDED_KEY, "true");
-    } catch {
-      // Storage unavailable — banner just won't be remembered as dismissed.
+  // Once logged in, check whether this account has been approved
+  // by the founder yet.
+  useEffect(() => {
+    if (!session) {
+      setApprovalStatus(session === null ? null : undefined);
+      return;
     }
-  }
+    let cancelled = false;
+    supabase
+      .from("approval_requests")
+      .select("approved")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error || !data) {
+          // No approval request on file — treat as already fine
+          // (covers accounts created before this system existed).
+          setApprovalStatus("approved");
+        } else {
+          setApprovalStatus(data.approved ? "approved" : "pending");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
 
-  // Theme: persist choice and apply it to the document root so CSS
-  // variables can be swapped in one place.
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, loading]);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+  }, [input]);
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     try {
@@ -136,9 +187,6 @@ function MaslahApp() {
     }
   }, [theme]);
 
-  // Streak: a simple day-based counter. If the student last opened the
-  // app yesterday, the streak continues; if it's been longer, it resets;
-  // opening again the same day doesn't change it.
   useEffect(() => {
     try {
       const today = new Date().toDateString();
@@ -177,60 +225,16 @@ function MaslahApp() {
   }, []);
 
   useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
-  }, [input]);
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      setSession(newSession);
-    });
-    return () => listener.subscription.unsubscribe();
+    const goOffline = () => setIsOffline(true);
+    const goOnline = () => setIsOffline(false);
+    window.addEventListener("offline", goOffline);
+    window.addEventListener("online", goOnline);
+    return () => {
+      window.removeEventListener("offline", goOffline);
+      window.removeEventListener("online", goOnline);
+    };
   }, []);
 
-  // Every account created through signup gets an approval_requests
-  // row that starts unapproved. Accounts that existed before this
-  // system was added have no row at all — those are treated as
-  // already approved (grandfathered in) rather than locked out.
-  async function checkApproval(userId) {
-    try {
-      const { data, error } = await supabase
-        .from("approval_requests")
-        .select("approved, code")
-        .eq("user_id", userId)
-        .maybeSingle();
-      if (error) throw error;
-      setApproval(data ?? null);
-    } catch (err) {
-      console.error(err);
-      // If the check itself fails (network hiccup, etc.), don't trap
-      // an already-approved student behind a broken gate — treat as
-      // approved and let them in; the real gate is server-side at
-      // signup/approve-request, this is just a UI convenience.
-      setApproval(null);
-    }
-  }
-
-  useEffect(() => {
-    if (session === undefined) return;
-    if (!session) {
-      setApproval(undefined);
-      return;
-    }
-    checkApproval(session.user.id);
-  }, [session]);
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, loading]);
-
-  // Persist the visible conversation so a refresh or accidental tab
-  // close doesn't wipe an in-progress study session. Only the last
-  // MAX_PERSISTED_MESSAGES are kept, and blob image URLs are dropped
-  // since they wouldn't survive a reload anyway.
   useEffect(() => {
     try {
       const toStore = messages.slice(-MAX_PERSISTED_MESSAGES).map((m) => {
@@ -251,131 +255,6 @@ function MaslahApp() {
       localStorage.removeItem(CHAT_SESSION_KEY);
     } catch {
       // Storage unavailable — clearing in-memory state is still enough.
-    }
-  }
-
-  const [loadingStep, setLoadingStep] = useState(0);
-
-  useEffect(() => {
-    if (!loading) {
-      setLoadingStep(0);
-      return;
-    }
-    const interval = setInterval(() => {
-      setLoadingStep((s) => (s + 1) % LOADING_MESSAGES.length);
-    }, 1800);
-    return () => clearInterval(interval);
-  }, [loading]);
-
-  async function handleSubmit(question, questionBook) {
-    if (loading || extracting) return;
-
-    const typed = (question ?? input).trim();
-    if (!typed && !pendingImage) return;
-
-    const targetBook = questionBook ?? book;
-    if (questionBook && questionBook !== book) setBook(questionBook);
-    setView("chat");
-
-    const imageForBubble = pendingImage?.previewUrl ?? null;
-    let finalQuestion = typed;
-
-    // A photo is attached — transcribe it, then combine the extracted
-    // text with whatever the student wrote underneath (if anything)
-    // before sending the combined question onward as before.
-    if (pendingImage) {
-      setExtracting(true);
-      try {
-        const data = await readImage(pendingImage.base64, pendingImage.mimeType);
-        const extracted = data?.text?.trim();
-        finalQuestion = extracted
-          ? typed
-            ? `${extracted}\n\n${typed}`
-            : extracted
-          : typed;
-      } catch (err) {
-        console.error(err);
-        setExtracting(false);
-        setImageError("Couldn't read that photo — please try again, or remove it and type the question instead.");
-        return;
-      }
-      setExtracting(false);
-    }
-
-    if (!finalQuestion.trim()) return;
-
-    setInput("");
-    setPendingImage(null);
-    setImageError("");
-    setMessages((m) => [
-      ...m,
-      { role: "student", text: typed, image: imageForBubble, book: targetBook },
-    ]);
-    setLoading(true);
-    try {
-      // Send recent conversation so the AI can resolve follow-up
-      // questions about a passage pasted earlier without the
-      // student needing to repaste it every time.
-      const recentHistory = messages
-        .filter((m) => m.role === "student" || m.role === "assistant")
-        .slice(-6)
-        .map((m) => ({ role: m.role, text: m.text }));
-
-      const data = await askQuestion(finalQuestion, targetBook, recentHistory);
-      setMessages((m) => [
-        ...m,
-        { role: "assistant", text: data.answer, evidence: data.evidenceUsed, book: targetBook },
-      ]);
-    } catch (err) {
-      setMessages((m) => [
-        ...m,
-        {
-          role: "error",
-          text: "Something went wrong retrieving that answer. Please try again.",
-          book: targetBook,
-          retryQuestion: finalQuestion,
-        },
-      ]);
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function retryFailedMessage(message) {
-    if (!message.retryQuestion) return;
-    handleSubmit(message.retryQuestion, message.book);
-  }
-
-  // Loads a chosen/captured photo into the preview card — no OCR yet.
-  // Transcription only happens once the student actually hits submit,
-  // so they get a chance to review, retake, remove, or annotate first.
-  async function handleImageFile(file, source) {
-    if (!file) return;
-    setImageError("");
-    try {
-      // Phone camera photos are often several MB, which can exceed
-      // the edge function's request size limit once base64-encoded
-      // (roughly +33% larger) — silently causing the request to be
-      // dropped. Shrinking to a reasonable max dimension keeps the
-      // upload small and fast without hurting text readability.
-      const resizedBlob = await resizeImage(file, 1600, 0.75);
-      const previewUrl = URL.createObjectURL(resizedBlob);
-
-      const base64 = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result.split(",")[1]);
-        reader.onerror = () => reject(new Error("Could not read that file."));
-        reader.readAsDataURL(resizedBlob);
-      });
-
-      setPendingImage((prev) => {
-        if (prev?.previewUrl) URL.revokeObjectURL(prev.previewUrl);
-        return { previewUrl, base64, mimeType: "image/jpeg", source };
-      });
-    } catch (err) {
-      console.error(err);
-      setImageError("Couldn't load that photo — please try again.");
     }
   }
 
@@ -437,7 +316,7 @@ function MaslahApp() {
 
   async function openBookInfo() {
     setShowBookInfo(true);
-    if (bookInfo[book] && !bookInfo[book].error) return; // already fetched
+    if (bookInfo[book] && !bookInfo[book].error) return;
     setBookInfo((prev) => ({ ...prev, [book]: { text: "", loading: true, error: false } }));
     try {
       const data = await askQuestion(BOOK_INFO_PROMPT, book, []);
@@ -448,23 +327,63 @@ function MaslahApp() {
     }
   }
 
-  function removeImage() {
-    setPendingImage((prev) => {
-      if (prev?.previewUrl) URL.revokeObjectURL(prev.previewUrl);
-      return null;
-    });
-    setImageError("");
+  function dismissOnboarding() {
+    setShowOnboarding(false);
+    try {
+      localStorage.setItem(ONBOARDED_KEY, "true");
+    } catch {
+      // Storage unavailable — banner just won't be remembered as dismissed.
+    }
   }
 
-  function retakeImage() {
-    const source = pendingImage?.source;
-    removeImage();
-    if (source === "camera") cameraInputRef.current?.click();
-    else uploadInputRef.current?.click();
+  function retryFailedMessage(message) {
+    if (!message.retryQuestion) return;
+    handleSubmit(message.retryQuestion, message.book);
   }
 
-  // Resizes/compresses an image file down to a max dimension and
-  // JPEG quality, returning a Blob — keeps photo uploads small.
+  async function handleSubmit(question, questionBook, attachedImage) {
+    const q = (question ?? input).trim();
+    if (!q || loading) return;
+    const targetBook = questionBook ?? book;
+    if (questionBook && questionBook !== book) setBook(questionBook);
+    setView("chat");
+    setInput("");
+    setMessages((m) => [...m, { role: "student", text: q, book: targetBook, image: attachedImage }]);
+    setLoading(true);
+    try {
+      const recentHistory = messages
+        .filter((m) => m.role === "student" || m.role === "assistant")
+        .slice(-6)
+        .map((m) => ({ role: m.role, text: m.text }));
+
+      const data = await askQuestion(q, targetBook, recentHistory);
+      setMessages((m) => [
+        ...m,
+        {
+          role: "assistant",
+          text: data.answer,
+          evidence: data.evidenceUsed,
+          book: targetBook,
+          groundedInEvidence: data.groundedInEvidence,
+          higherRiskSubject: data.higherRiskSubject,
+        },
+      ]);
+    } catch (err) {
+      setMessages((m) => [
+        ...m,
+        {
+          role: "error",
+          text: "Something went wrong retrieving that answer. Please try again.",
+          book: targetBook,
+          retryQuestion: q,
+        },
+      ]);
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function resizeImage(file, maxDimension, quality) {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -472,7 +391,6 @@ function MaslahApp() {
 
       img.onload = () => {
         URL.revokeObjectURL(objectUrl);
-
         let { width, height } = img;
         if (width > maxDimension || height > maxDimension) {
           if (width > height) {
@@ -483,174 +401,202 @@ function MaslahApp() {
             height = maxDimension;
           }
         }
-
         const canvas = document.createElement("canvas");
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext("2d");
         ctx.drawImage(img, 0, 0, width, height);
-
         canvas.toBlob(
           (blob) => (blob ? resolve(blob) : reject(new Error("Could not process that image."))),
           "image/jpeg",
           quality,
         );
       };
-
       img.onerror = () => {
         URL.revokeObjectURL(objectUrl);
         reject(new Error("Could not load that image."));
       };
-
       img.src = objectUrl;
     });
   }
 
-  // Still checking whether a session already exists (avoids a login-screen flash on reload)
+  async function handleImageFile(file) {
+    if (!file) return;
+    setImageError("");
+    try {
+      const resizedBlob = await resizeImage(file, 1600, 0.75);
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error("Could not read that file."));
+        reader.readAsDataURL(resizedBlob);
+      });
+
+      setPendingImage({ dataUrl, blob: resizedBlob });
+      setExtractedText("");
+      setImageCaption("");
+      setExtracting(true);
+
+      const base64 = dataUrl.split(",")[1];
+      const data = await readImage(base64, "image/jpeg");
+      setExtractedText(data.text);
+    } catch (err) {
+      console.error(err);
+      setImageError("Couldn't read that photo — you can retake it, or remove it and type the question instead.");
+    } finally {
+      setExtracting(false);
+    }
+  }
+
+  function clearPendingImage() {
+    setPendingImage(null);
+    setExtractedText("");
+    setImageCaption("");
+    setImageError("");
+  }
+
+  function retakePhoto() {
+    clearPendingImage();
+    cameraInputRef.current?.click();
+  }
+
+  function submitImageQuestion() {
+    if (!extractedText.trim() || extracting) return;
+    const combined = imageCaption.trim()
+      ? `${extractedText.trim()}\n\nQuestion: ${imageCaption.trim()}`
+      : `${extractedText.trim()}\n\nAnswer this using evidence from the excerpt above.`;
+    const thumbnail = pendingImage?.dataUrl;
+    clearPendingImage();
+    handleSubmit(combined, undefined, thumbnail);
+  }
+
+  if (!granted) {
+    return <AccessGate onGranted={() => setGranted(true)} />;
+  }
+
   if (session === undefined) {
     return <div className="auth-screen" />;
   }
 
-  // Not logged in — show the login/signup screen and gate everything else
   if (!session) {
+    return <Auth onAuthed={() => {}} onPendingApproval={(code) => setPendingCode(code)} />;
+  }
+
+  if (approvalStatus === "pending" || pendingCode) {
     return (
-      <div className="view-fade">
-        <Auth onAuthed={() => {}} />
-      </div>
+      <PendingApproval
+        code={pendingCode}
+        onApproved={() => {
+          setPendingCode(null);
+          setApprovalStatus("approved");
+        }}
+        onLogout={() => {
+          setPendingCode(null);
+          supabase.auth.signOut();
+        }}
+      />
     );
   }
 
-  // Logged in, but still checking (or waiting on) approval status
-  if (approval === undefined) {
+  if (approvalStatus === undefined) {
     return <div className="auth-screen" />;
-  }
-
-  if (approval && approval.approved === false) {
-    return (
-      <div className="view-fade">
-        <div className="auth-screen">
-          <div className="auth-card">
-            <div className="brand">
-              <span className="brand-mark">M</span>
-              <div>
-                <h1>Maslah Academy AI</h1>
-                <p className="tagline">Evidence-based KCSE setbook answers</p>
-              </div>
-            </div>
-
-            <p className="access-intro">
-              Your account has been created but hasn't been approved yet. Share this
-              review code with your teacher or admin so they can approve your access.
-            </p>
-
-            <div className="review-code-display">{approval.code}</div>
-
-            <button
-              type="button"
-              className="auth-submit"
-              onClick={() => checkApproval(session.user.id)}
-            >
-              I've been approved — check again
-            </button>
-            <button
-              type="button"
-              className="pending-logout"
-              onClick={() => supabase.auth.signOut()}
-            >
-              Log out
-            </button>
-          </div>
-        </div>
-      </div>
-    );
   }
 
   if (view === "history") {
     return (
-      <div className="view-fade">
-        <History
-          onBack={() => setView("chat")}
-          onReuse={(question, questionBook) => handleSubmit(question, questionBook)}
-        />
-      </div>
+      <History
+        onBack={() => setView("chat")}
+        onReuse={(question, questionBook) => handleSubmit(question, questionBook)}
+      />
     );
   }
 
   if (view === "about") {
-    return (
-      <div className="view-fade">
-        <About onBack={() => setView("chat")} />
-      </div>
-    );
+    return <About onBack={() => setView("chat")} />;
   }
 
   return (
-    <div className="view-fade">
-      <div className="app">
+    <div className="app">
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">M</span>
           <div>
             <h1>Maslah Academy AI</h1>
-            <p className="tagline">Evidence-based KCSE setbook answers</p>
+            <p className="tagline">Setbook analysis + full-subject KCSE support</p>
           </div>
-          {streak > 1 && (
-            <span className="streak-badge" title={`${streak}-day study streak`}>
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
-                <path d="M12 2c1 3-1 4.5-2 6-1.3 2-2 3.6-2 5.5A4.5 4.5 0 0 0 12 18a4.5 4.5 0 0 0 4-6.5c1 .8 1.5 2 1.5 3A5.5 5.5 0 0 1 12 20a6.5 6.5 0 0 1-6.5-6.5C5.5 9 8 6.5 9.5 4.5 10.3 3.5 11 2.8 12 2Z" />
-              </svg>
-              {streak}
-            </span>
-          )}
-          <button
-            className="icon-toggle-btn"
-            title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
-            onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
-          >
-            {theme === "light" ? (
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z" />
-              </svg>
-            ) : (
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="4.2" />
-                <path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.55 1.55M18.25 18.25l1.55 1.55M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.55-1.55M18.25 5.75l1.55-1.55" />
-              </svg>
+          <div className="topbar-actions">
+            {streak > 1 && (
+              <span className="streak-badge" title={`${streak}-day study streak`}>
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                  <path d="M12 2c1 3-1 4.5-2 6-1.3 2-2 3.6-2 5.5A4.5 4.5 0 0 0 12 18a4.5 4.5 0 0 0 4-6.5c1 .8 1.5 2 1.5 3A5.5 5.5 0 0 1 12 20a6.5 6.5 0 0 1-6.5-6.5C5.5 9 8 6.5 9.5 4.5 10.3 3.5 11 2.8 12 2Z" />
+                </svg>
+                {streak}
+              </span>
             )}
-          </button>
-          <button
-            className="icon-toggle-btn"
-            title="Saved answers"
-            onClick={() => setShowBookmarks(true)}
-          >
-            <svg viewBox="0 0 24 24" width="16" height="16" fill={bookmarks.length ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round">
-              <path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1Z" />
-            </svg>
-          </button>
-          {messages.length > 0 && (
             <button
-              className="icon-toggle-btn"
-              title="Clear this conversation"
-              onClick={() => {
-                if (window.confirm("Clear this conversation? Saved bookmarks won't be affected.")) {
-                  clearConversation();
-                }
-              }}
+              className="icon-nav-btn"
+              title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+              onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
             >
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M4.5 7h15M9.5 7V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2M18 7l-.7 12.1a1.5 1.5 0 0 1-1.5 1.4H8.2a1.5 1.5 0 0 1-1.5-1.4L6 7" />
-              </svg>
+              {theme === "light" ? (
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <circle cx="12" cy="12" r="4.2" stroke="currentColor" strokeWidth="1.6" />
+                  <path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.55 1.55M18.25 18.25l1.55 1.55M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.55-1.55M18.25 5.75l1.55-1.55" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                </svg>
+              )}
+              <span>Theme</span>
             </button>
-          )}
-          <button className="history-btn" onClick={() => setView("history")}>
-            History
-          </button>
-          <button className="history-btn" onClick={() => setView("about")}>
-            About
-          </button>
-          <button className="logout-btn" onClick={() => supabase.auth.signOut()}>
-            Log out
-          </button>
+            <button className="icon-nav-btn" title="Saved answers" onClick={() => setShowBookmarks(true)}>
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" fill={bookmarks.length ? "currentColor" : "none"} />
+              </svg>
+              <span>Saved</span>
+            </button>
+            {messages.length > 0 && (
+              <button
+                className="icon-nav-btn"
+                title="Clear this conversation"
+                onClick={() => {
+                  if (window.confirm("Clear this conversation? Saved bookmarks won't be affected.")) {
+                    clearConversation();
+                  }
+                }}
+              >
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M4.5 7h15M9.5 7V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2M18 7l-.7 12.1a1.5 1.5 0 0 1-1.5 1.4H8.2a1.5 1.5 0 0 1-1.5-1.4L6 7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <span>Clear</span>
+              </button>
+            )}
+            <button className="icon-nav-btn" onClick={() => setView("history")} title="History">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 12a8 8 0 1 1 2.6 5.9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                <path d="M4 6v5h5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M12 8v4.5l3 2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span>History</span>
+            </button>
+            <button className="icon-nav-btn" onClick={() => setView("about")} title="About">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="12" cy="12" r="8.2" stroke="currentColor" strokeWidth="1.6" />
+                <path d="M12 11v5.2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                <circle cx="12" cy="8" r="1" fill="currentColor" />
+              </svg>
+              <span>About</span>
+            </button>
+            <button className="icon-nav-btn logout" onClick={() => supabase.auth.signOut()} title="Log out">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M9 4H6.5A1.5 1.5 0 0 0 5 5.5v13A1.5 1.5 0 0 0 6.5 20H9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M14 16l4-4-4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M18 12H9.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+              <span>Log out</span>
+            </button>
+          </div>
         </div>
         <div className="book-select-row">
           <div className="book-select">
@@ -665,12 +611,35 @@ function MaslahApp() {
               </button>
             ))}
           </div>
-          <button className="book-info-btn" onClick={openBookInfo} title="About this setbook">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="9.2" />
-              <path d="M12 11v5.5M12 8v.01" />
-            </svg>
-          </button>
+          {BOOKS.includes(book) && (
+            <button className="book-info-btn" onClick={openBookInfo} title="About this setbook">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="9.2" />
+                <path d="M12 11v5.5M12 8v.01" />
+              </svg>
+            </button>
+          )}
+        </div>
+
+        <div className="subject-select-row">
+          <span className="subject-select-label">Other subjects</span>
+          <div className="book-select subject-select">
+            {SUBJECTS.map((s) => (
+              <button
+                key={s}
+                className={`book-pill subject-pill ${s === book ? "active" : ""}`}
+                onClick={() => setBook(s)}
+                title={
+                  HIGHER_RISK_SUBJECTS.includes(s)
+                    ? "General knowledge — no ingested textbook, so double-check precise details"
+                    : "General knowledge — no ingested textbook for this subject"
+                }
+              >
+                {s}
+                {HIGHER_RISK_SUBJECTS.includes(s) && <span className="subject-risk-dot" />}
+              </button>
+            ))}
+          </div>
         </div>
       </header>
 
@@ -729,16 +698,30 @@ function MaslahApp() {
             <div className="hero-mark">M</div>
             <p className="eyebrow">Currently studying</p>
             <h2>{book}</h2>
-            <p className="hint">
-              Ask an essay question, an excerpt-based question, or a question on character,
-              theme, or style. Every answer is built from evidence in the actual text.
-            </p>
+            {BOOKS.includes(book) ? (
+              <>
+                <span className="grounding-badge evidence">Evidence-based</span>
+                <p className="hint">
+                  Ask an essay question, an excerpt-based question, or a question on character,
+                  theme, or style. Every answer is built from evidence in the actual text.
+                </p>
+              </>
+            ) : (
+              <>
+                <span className="grounding-badge general">General knowledge</span>
+                <p className="hint">
+                  Ask any {book} question. There's no ingested textbook for this subject, so
+                  answers come from general AI knowledge rather than a cited source
+                  {HIGHER_RISK_SUBJECTS.includes(book) ? " — worth double-checking precise details." : "."}
+                </p>
+              </>
+            )}
             <div className="starters">
-              {STARTER_PROMPTS.map((p, i) => (
+              {(BOOKS.includes(book) ? STARTER_PROMPTS : GENERAL_STARTER_PROMPTS).map((p, idx) => (
                 <button
                   key={p}
                   className="starter"
-                  style={{ animationDelay: `${i * 0.08 + 0.15}s` }}
+                  style={{ animationDelay: `${idx * 0.08 + 0.15}s` }}
                   onClick={() => handleSubmit(p)}
                 >
                   {p}
@@ -752,8 +735,8 @@ function MaslahApp() {
           <div key={i} className={`bubble-row ${m.role}`}>
             {m.role === "student" && (
               <div className="bubble student">
-                {m.image && <img className="bubble-image" src={m.image} alt="Submitted question material" />}
-                {m.text && <div>{m.text}</div>}
+                {m.image && <img src={m.image} alt="Submitted question" className="bubble-image" />}
+                {m.text}
               </div>
             )}
             {m.role === "error" && (
@@ -780,6 +763,11 @@ function MaslahApp() {
                 <div className="answer-toolbar">
                   <div className="answer-label">
                     Maslah AI — {m.book}
+                    {m.groundedInEvidence === false && (
+                      <span className={`grounding-badge inline ${m.higherRiskSubject ? "risk" : "general"}`}>
+                        {m.higherRiskSubject ? "General knowledge — verify specifics" : "General knowledge"}
+                      </span>
+                    )}
                     <span className="word-count">
                       {m.text.trim().split(/\s+/).filter(Boolean).length} words
                     </span>
@@ -871,99 +859,131 @@ function MaslahApp() {
         )}
       </main>
 
-      <form
-        className="composer"
-        onSubmit={(e) => {
-          e.preventDefault();
-          handleSubmit();
+      <input
+        type="file"
+        accept="image/*"
+        capture="environment"
+        ref={cameraInputRef}
+        style={{ display: "none" }}
+        onChange={(e) => {
+          handleImageFile(e.target.files?.[0]);
+          e.target.value = "";
         }}
-      >
-        <input
-          type="file"
-          accept="image/*"
-          capture="environment"
-          ref={cameraInputRef}
-          style={{ display: "none" }}
-          onChange={(e) => {
-            handleImageFile(e.target.files?.[0], "camera");
-            e.target.value = "";
-          }}
-        />
-        <input
-          type="file"
-          accept="image/*"
-          ref={uploadInputRef}
-          style={{ display: "none" }}
-          onChange={(e) => {
-            handleImageFile(e.target.files?.[0], "upload");
-            e.target.value = "";
-          }}
-        />
+      />
+      <input
+        type="file"
+        accept="image/*"
+        ref={uploadInputRef}
+        style={{ display: "none" }}
+        onChange={(e) => {
+          handleImageFile(e.target.files?.[0]);
+          e.target.value = "";
+        }}
+      />
 
-        {pendingImage && (
-          <div className="image-preview-card">
-            <img className="image-preview-thumb" src={pendingImage.previewUrl} alt="Selected question material" />
-            <div className="image-preview-meta">
-              <span className="image-preview-label">Photo attached</span>
-              <div className="image-preview-actions">
-                <button type="button" className="image-preview-action" onClick={retakeImage} disabled={extracting}>
-                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 12a9 9 0 1 1-3-6.7" />
-                    <polyline points="21 3 21 9 15 9" />
-                  </svg>
-                  {pendingImage.source === "camera" ? "Retake" : "Replace"}
-                </button>
-                <button type="button" className="image-preview-action remove" onClick={removeImage} disabled={extracting}>
-                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round">
-                    <path d="M6 6l12 12M18 6L6 18" />
-                  </svg>
-                  Remove
-                </button>
-              </div>
+      {pendingImage ? (
+        <div className="image-preview-panel">
+          <div className="image-preview-header">
+            <span>Photo question</span>
+            <button type="button" className="image-preview-close" onClick={clearPendingImage} title="Remove photo">
+              ✕
+            </button>
+          </div>
+
+          <div className="image-preview-body">
+            <img src={pendingImage.dataUrl} alt="Selected question" className="image-preview-thumb" />
+
+            <div className="image-preview-text">
+              {extracting ? (
+                <div className="extracting-row">
+                  <span className="dot" />
+                  <span className="dot" />
+                  <span className="dot" />
+                  <span className="extracting-label">Reading text from photo…</span>
+                </div>
+              ) : (
+                <textarea
+                  className="extracted-text"
+                  value={extractedText}
+                  onChange={(e) => setExtractedText(e.target.value)}
+                  rows={4}
+                  placeholder="Extracted text will appear here — check it, then edit anything that looks wrong."
+                />
+              )}
+              <input
+                className="image-caption-input"
+                type="text"
+                value={imageCaption}
+                onChange={(e) => setImageCaption(e.target.value)}
+                placeholder='Question (optional) — e.g. "Answer this using evidence from The Samaritan"'
+              />
             </div>
           </div>
-        )}
 
-        <div className="composer-row">
+          <div className="image-preview-actions">
+            <button type="button" className="image-action-btn" onClick={retakePhoto}>
+              Retake
+            </button>
+            <button type="button" className="image-action-btn" onClick={clearPendingImage}>
+              Remove
+            </button>
+            <button
+              type="button"
+              className="image-action-btn primary"
+              disabled={extracting || !extractedText.trim() || loading || isOffline}
+              onClick={submitImageQuestion}
+            >
+              Submit
+            </button>
+          </div>
+        </div>
+      ) : (
+        <form
+          className="composer"
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleSubmit();
+          }}
+        >
           <button
             type="button"
             className="photo-btn"
             title="Take a photo of a question"
-            disabled={extracting || isOffline}
+            disabled={isOffline}
             onClick={() => cameraInputRef.current?.click()}
           >
-            <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M4 8.5h2.7l1.3-2a1.3 1.3 0 0 1 1.1-.6h5.8a1.3 1.3 0 0 1 1.1.6l1.3 2H20a1 1 0 0 1 1 1v9.2a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9.5a1 1 0 0 1 1-1Z" />
-              <circle cx="12" cy="14" r="3.7" />
-              <path d="M16.2 8.7h1.3" />
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path
+                d="M4 8.5C4 7.67 4.67 7 5.5 7H7.8L8.55 5.6C8.81 5.11 9.32 4.8 9.87 4.8H14.13C14.68 4.8 15.19 5.11 15.45 5.6L16.2 7H18.5C19.33 7 20 7.67 20 8.5V17.5C20 18.33 19.33 19 18.5 19H5.5C4.67 19 4 18.33 4 17.5V8.5Z"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+              />
+              <circle cx="12" cy="13" r="3.2" stroke="currentColor" strokeWidth="1.5" />
             </svg>
+            <span>Camera</span>
           </button>
           <button
             type="button"
             className="photo-btn"
             title="Upload a photo"
-            disabled={extracting || isOffline}
+            disabled={isOffline}
             onClick={() => uploadInputRef.current?.click()}
           >
-            <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3.3" y="4.3" width="17.4" height="15.4" rx="2.4" />
-              <circle cx="8.3" cy="9" r="1.7" fill="currentColor" stroke="none" />
-              <path d="M4.3 16.8l4.6-4.9 3.3 3.4 2.9-3.1 4.6 4.6" />
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="4" y="5" width="16" height="14" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M4 15.5L8.5 11.5C9.02 11.03 9.8 11.03 10.3 11.5L13 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M12.5 14L14.7 12C15.22 11.53 16 11.53 16.5 12L20 15" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              <circle cx="8.3" cy="8.7" r="1.3" stroke="currentColor" strokeWidth="1.5" />
             </svg>
+            <span>Upload</span>
           </button>
           <textarea
             ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={
-              extracting
-                ? "Reading your photo…"
-                : pendingImage
-                ? "Add a note or instruction (optional)…"
-                : `Ask a question on ${book}...`
-            }
+            placeholder={`Ask a question on ${book}...`}
             rows={1}
-            disabled={extracting}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
@@ -971,13 +991,12 @@ function MaslahApp() {
               }
             }}
           />
-          <button type="submit" disabled={loading || extracting || isOffline || (!input.trim() && !pendingImage)}>
-            {extracting ? "Reading…" : "Ask"}
+          <button type="submit" disabled={loading || isOffline || !input.trim()}>
+            Ask
           </button>
-        </div>
-      </form>
+        </form>
+      )}
       {imageError && <p className="image-error">{imageError}</p>}
-      </div>
 
       {showBookmarks && (
         <div className="overlay" onClick={() => setShowBookmarks(false)}>
