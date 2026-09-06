@@ -956,6 +956,38 @@ body {
   margin: 0 0 1.25rem;
 }
 
+.review-code-display {
+  font-family: monospace;
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-align: center;
+  color: var(--maroon);
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-tint-border);
+  border-radius: var(--radius);
+  padding: 0.7rem;
+  margin-bottom: 1.1rem;
+}
+
+.pending-logout {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: "Inter", sans-serif;
+  font-size: 0.82rem;
+  text-align: center;
+  margin-top: 0.9rem;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.pending-logout:hover {
+  color: var(--maroon);
+}
+
 .auth-tabs {
   display: flex;
   border: 1px solid var(--line);
