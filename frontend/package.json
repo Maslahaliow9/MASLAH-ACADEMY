@@ -19,3 +19,4 @@
     "vite-plugin-pwa": "^0.20.5"
   }
 }
+npm install jspdf html2canvas
