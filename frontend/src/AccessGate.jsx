@@ -7,14 +7,20 @@ import { useState } from "react";
 const ACCESS_CODE = "Maslahaliow1010101010";
 const STORAGE_KEY = "maslah_access_granted";
 
+// Lets other components (App.jsx) check on load whether the access
+// code was already entered on this device, without needing to
+// render the gate itself — reads the exact same storage key the
+// component below uses, so the two always agree.
+export function hasAccess() {
+  try {
+    return localStorage.getItem(STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
 export default function AccessGate({ children }) {
-  const [granted, setGranted] = useState(() => {
-    try {
-      return localStorage.getItem(STORAGE_KEY) === "true";
-    } catch {
-      return false;
-    }
-  });
+  const [granted, setGranted] = useState(() => hasAccess());
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
 
