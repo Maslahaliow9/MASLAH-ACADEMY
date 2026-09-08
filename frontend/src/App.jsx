@@ -380,6 +380,29 @@ export default function App() {
     }
   }
 
+  // supabase.functions.invoke() only gives a generic "Edge Function
+  // returned a non-2xx status code" in error.message on any HTTP
+  // failure — the function's actual, useful error text sits unread
+  // inside error.context (the raw Response). This pulls that out so
+  // the real reason shows up instead of the same unhelpful message
+  // every time something goes wrong for a completely different reason.
+  async function getFunctionErrorMessage(error, fallback) {
+    if (error?.context && typeof error.context.json === "function") {
+      try {
+        const body = await error.context.json();
+        if (body?.error) return body.error;
+      } catch {
+        try {
+          const text = await error.context.text();
+          if (text) return text;
+        } catch {
+          // Fall through to the generic message below.
+        }
+      }
+    }
+    return error?.message || fallback;
+  }
+
   async function startQuiz() {
     setQuizStage("loading");
     setQuizError("");
@@ -387,7 +410,7 @@ export default function App() {
       const { data, error } = await supabase.functions.invoke("generate-quiz", {
         body: { subject: quizSubject, difficulty: quizDifficulty, count: 10 },
       });
-      if (error) throw error;
+      if (error) throw new Error(await getFunctionErrorMessage(error, "Couldn't generate the quiz. Please try again."));
       if (data?.error) throw new Error(data.error);
       if (!data?.questions?.length) throw new Error("No questions were generated. Please try again.");
       setQuizQuestions(data.questions);
@@ -532,7 +555,7 @@ export default function App() {
     const { data, error } = await supabase.functions.invoke("generate-quiz", {
       body: { subject, difficulty, count: 5, avoid: alreadyAsked.slice(-30) },
     });
-    if (error) throw error;
+    if (error) throw new Error(await getFunctionErrorMessage(error, "Couldn't generate a question. Please try again."));
     if (data?.error) throw new Error(data.error);
     if (!data?.questions?.length) throw new Error("No questions were generated. Please try again.");
     return data.questions;
