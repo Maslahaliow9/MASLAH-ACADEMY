@@ -93,6 +93,7 @@ export default function App() {
     }
   });
   const [showBookmarks, setShowBookmarks] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(false);
   const [bookmarkQuery, setBookmarkQuery] = useState("");
   const [bookInfo, setBookInfo] = useState({});
   const [showBookInfo, setShowBookInfo] = useState(false);
@@ -519,10 +520,20 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
+          <button className="hamburger-btn" onClick={() => setShowSidebar(true)} title="Choose a setbook or subject">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <path d="M4 7h16M4 12h16M4 17h16" />
+            </svg>
+          </button>
           <span className="brand-mark">M</span>
           <div>
             <h1>Maslah Academy AI</h1>
-            <p className="tagline">Setbook analysis + full-subject KCSE support</p>
+            <p className="tagline current-subject" onClick={() => setShowSidebar(true)}>
+              {book}
+              <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </p>
           </div>
           <div className="topbar-actions">
             {streak > 1 && (
@@ -596,49 +607,6 @@ export default function App() {
               </svg>
               <span>Log out</span>
             </button>
-          </div>
-        </div>
-        <div className="book-select-row">
-          <div className="book-select">
-            {BOOKS.map((b) => (
-              <button
-                key={b}
-                className={`book-pill ${b === book ? "active" : ""}`}
-                onClick={() => setBook(b)}
-              >
-                <span className="book-pill-icon">{b[0]}</span>
-                {b}
-              </button>
-            ))}
-          </div>
-          {BOOKS.includes(book) && (
-            <button className="book-info-btn" onClick={openBookInfo} title="About this setbook">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="9.2" />
-                <path d="M12 11v5.5M12 8v.01" />
-              </svg>
-            </button>
-          )}
-        </div>
-
-        <div className="subject-select-row">
-          <span className="subject-select-label">Other subjects</span>
-          <div className="book-select subject-select">
-            {SUBJECTS.map((s) => (
-              <button
-                key={s}
-                className={`book-pill subject-pill ${s === book ? "active" : ""}`}
-                onClick={() => setBook(s)}
-                title={
-                  HIGHER_RISK_SUBJECTS.includes(s)
-                    ? "General knowledge — no ingested textbook, so double-check precise details"
-                    : "General knowledge — no ingested textbook for this subject"
-                }
-              >
-                {s}
-                {HIGHER_RISK_SUBJECTS.includes(s) && <span className="subject-risk-dot" />}
-              </button>
-            ))}
           </div>
         </div>
       </header>
@@ -997,6 +965,87 @@ export default function App() {
         </form>
       )}
       {imageError && <p className="image-error">{imageError}</p>}
+
+      {showSidebar && (
+        <div className="sidebar-overlay" onClick={() => setShowSidebar(false)}>
+          <div className="sidebar-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="sidebar-header">
+              <div className="sidebar-brand">
+                <span className="brand-mark">M</span>
+                <span>Maslah Academy AI</span>
+              </div>
+              <button className="overlay-close" onClick={() => setShowSidebar(false)}>
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="sidebar-scroll">
+              <p className="sidebar-section-label">Setbooks — evidence-based</p>
+              {BOOKS.map((b) => (
+                <button
+                  key={b}
+                  className={`sidebar-item ${b === book ? "active" : ""}`}
+                  onClick={() => {
+                    setBook(b);
+                    setShowSidebar(false);
+                  }}
+                >
+                  <span className="sidebar-item-icon">{b[0]}</span>
+                  {b}
+                  {b === book && (
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="sidebar-item-check">
+                      <polyline points="5 12 10 17 19 6" />
+                    </svg>
+                  )}
+                </button>
+              ))}
+
+              {BOOKS.includes(book) && (
+                <button
+                  className="sidebar-subaction"
+                  onClick={() => {
+                    openBookInfo();
+                    setShowSidebar(false);
+                  }}
+                >
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="9.2" />
+                    <path d="M12 11v5.5M12 8v.01" />
+                  </svg>
+                  About {book}
+                </button>
+              )}
+
+              <p className="sidebar-section-label">Other subjects — general knowledge</p>
+              {SUBJECTS.map((s) => (
+                <button
+                  key={s}
+                  className={`sidebar-item ${s === book ? "active" : ""}`}
+                  onClick={() => {
+                    setBook(s);
+                    setShowSidebar(false);
+                  }}
+                  title={
+                    HIGHER_RISK_SUBJECTS.includes(s)
+                      ? "No ingested textbook — double-check precise details"
+                      : "No ingested textbook for this subject"
+                  }
+                >
+                  {s}
+                  {HIGHER_RISK_SUBJECTS.includes(s) && <span className="subject-risk-dot" />}
+                  {s === book && (
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="sidebar-item-check">
+                      <polyline points="5 12 10 17 19 6" />
+                    </svg>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {showBookmarks && (
         <div className="overlay" onClick={() => setShowBookmarks(false)}>
