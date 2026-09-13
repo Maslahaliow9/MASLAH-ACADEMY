@@ -73,6 +73,8 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  overflow-x: hidden;
+  max-width: 100%;
 }
 
 body {
@@ -107,6 +109,8 @@ body {
   display: flex;
   align-items: center;
   gap: 0.7rem;
+  flex-wrap: wrap;
+  row-gap: 0.5rem;
 }
 
 .brand-mark {
@@ -131,6 +135,14 @@ body {
   margin: 0;
   color: var(--ink);
   letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.brand > div {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .tagline {
@@ -409,6 +421,7 @@ body {
 
 .composer textarea {
   flex: 1;
+  min-width: 0;
   resize: none;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -970,6 +983,7 @@ body {
 .topbar-actions {
   margin-left: auto;
   display: flex;
+  flex-wrap: wrap;
   gap: 0.4rem;
 }
 
@@ -1109,6 +1123,14 @@ body {
   .app {
     border-left: none;
     border-right: none;
+  }
+
+  .photo-btn {
+    width: 42px;
+  }
+
+  .photo-btn span {
+    display: none;
   }
 }
 
@@ -1696,6 +1718,9 @@ body {
   color: var(--maroon) !important;
   font-weight: 600;
   transition: opacity 0.15s ease;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .current-subject:hover {
