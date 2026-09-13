@@ -251,12 +251,11 @@ export default function App() {
   }, [messages]);
 
   function clearConversation() {
-    setMessages([]);
-    try {
-      localStorage.removeItem(CHAT_SESSION_KEY);
-    } catch {
-      // Storage unavailable — clearing in-memory state is still enough.
-    }
+    // Only clears the currently selected subject's messages — other
+    // subjects' history is untouched. The persistence effect above
+    // re-saves automatically whenever messages changes, so no extra
+    // localStorage call is needed here.
+    setMessages((prev) => prev.filter((m) => m.book !== book));
   }
 
   function toggleBookmark(message) {
@@ -353,7 +352,7 @@ export default function App() {
     setLoading(true);
     try {
       const recentHistory = messages
-        .filter((m) => m.role === "student" || m.role === "assistant")
+        .filter((m) => (m.role === "student" || m.role === "assistant") && m.book === targetBook)
         .slice(-6)
         .map((m) => ({ role: m.role, text: m.text }));
 
@@ -567,12 +566,12 @@ export default function App() {
               </svg>
               <span>Saved</span>
             </button>
-            {messages.length > 0 && (
+            {messages.some((m) => m.book === book) && (
               <button
                 className="icon-nav-btn"
-                title="Clear this conversation"
+                title="Clear this subject's conversation"
                 onClick={() => {
-                  if (window.confirm("Clear this conversation? Saved bookmarks won't be affected.")) {
+                  if (window.confirm(`Clear your ${book} conversation? Other subjects and saved bookmarks won't be affected.`)) {
                     clearConversation();
                   }
                 }}
@@ -661,45 +660,54 @@ export default function App() {
       )}
 
       <main className="chat" ref={scrollRef}>
-        {messages.length === 0 && (
-          <div className="empty-state hero">
-            <div className="hero-mark">M</div>
-            <p className="eyebrow">Currently studying</p>
-            <h2>{book}</h2>
-            {BOOKS.includes(book) ? (
-              <>
-                <span className="grounding-badge evidence">Evidence-based</span>
-                <p className="hint">
-                  Ask an essay question, an excerpt-based question, or a question on character,
-                  theme, or style. Every answer is built from evidence in the actual text.
-                </p>
-              </>
-            ) : (
-              <>
-                <span className="grounding-badge general">General knowledge</span>
-                <p className="hint">
-                  Ask any {book} question. There's no ingested textbook for this subject, so
-                  answers come from general AI knowledge rather than a cited source
-                  {HIGHER_RISK_SUBJECTS.includes(book) ? " — worth double-checking precise details." : "."}
-                </p>
-              </>
-            )}
-            <div className="starters">
-              {(BOOKS.includes(book) ? STARTER_PROMPTS : GENERAL_STARTER_PROMPTS).map((p, idx) => (
-                <button
-                  key={p}
-                  className="starter"
-                  style={{ animationDelay: `${idx * 0.08 + 0.15}s` }}
-                  onClick={() => handleSubmit(p)}
-                >
-                  {p}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+        {(() => {
+          // Only show messages that belong to the currently selected
+          // setbook/subject — switching subjects in the sidebar now
+          // shows that subject's own history, not everything mixed
+          // together. Nothing is deleted from state, just filtered
+          // for display, so switching back restores it.
+          const visibleMessages = messages.filter((m) => m.book === book);
+          return (
+            <>
+              {visibleMessages.length === 0 && (
+                <div className="empty-state hero">
+                  <div className="hero-mark">M</div>
+                  <p className="eyebrow">Currently studying</p>
+                  <h2>{book}</h2>
+                  {BOOKS.includes(book) ? (
+                    <>
+                      <span className="grounding-badge evidence">Evidence-based</span>
+                      <p className="hint">
+                        Ask an essay question, an excerpt-based question, or a question on character,
+                        theme, or style. Every answer is built from evidence in the actual text.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <span className="grounding-badge general">General knowledge</span>
+                      <p className="hint">
+                        Ask any {book} question. There's no ingested textbook for this subject, so
+                        answers come from general AI knowledge rather than a cited source
+                        {HIGHER_RISK_SUBJECTS.includes(book) ? " — worth double-checking precise details." : "."}
+                      </p>
+                    </>
+                  )}
+                  <div className="starters">
+                    {(BOOKS.includes(book) ? STARTER_PROMPTS : GENERAL_STARTER_PROMPTS).map((p, idx) => (
+                      <button
+                        key={p}
+                        className="starter"
+                        style={{ animationDelay: `${idx * 0.08 + 0.15}s` }}
+                        onClick={() => handleSubmit(p)}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
-        {messages.map((m, i) => (
+              {visibleMessages.map((m, i) => (
           <div key={i} className={`bubble-row ${m.role}`}>
             {m.role === "student" && (
               <div className="bubble student">
@@ -813,7 +821,10 @@ export default function App() {
               </div>
             )}
           </div>
-        ))}
+              ))}
+            </>
+          );
+        })()}
 
         {loading && (
           <div className="bubble-row assistant">
