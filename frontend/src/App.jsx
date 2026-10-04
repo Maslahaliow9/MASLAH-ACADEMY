@@ -591,7 +591,7 @@ export default function App() {
               <path d="M4 7h16M4 12h16M4 17h16" />
             </svg>
           </button>
-          <span className="brand-mark">M</span>
+          <span className="brand-mark"><img src="/logo-mark.png" alt="" /></span>
           <div>
             <h1>Maslah Academy AI</h1>
             <p className="tagline current-subject" onClick={() => setShowSidebar(true)}>
@@ -722,7 +722,7 @@ export default function App() {
       <main className="chat" ref={scrollRef}>
         {visibleMessages.length === 0 && (
           <div className="empty-state hero">
-            <div className="hero-mark">M</div>
+            <div className="hero-mark"><img src="/logo-mark.png" alt="" /></div>
             <p className="eyebrow">Currently studying</p>
             <h2>{book}</h2>
             {BOOKS.includes(book) ? (
@@ -1035,7 +1035,7 @@ export default function App() {
           <div className="sidebar-panel" onClick={(e) => e.stopPropagation()}>
             <div className="sidebar-header">
               <div className="sidebar-brand">
-                <span className="brand-mark">M</span>
+                <span className="brand-mark"><img src="/logo-mark.png" alt="" /></span>
                 <span>Maslah Academy AI</span>
               </div>
               <button className="overlay-close" onClick={() => setShowSidebar(false)}>
