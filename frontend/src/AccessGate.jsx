@@ -64,11 +64,7 @@ export default function AccessGate({ children, onGranted }) {
     <div className="access-screen">
       <div className="access-card">
         <div className="access-mark">
-          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="5" y="10.5" width="14" height="9.5" rx="2" stroke="currentColor" strokeWidth="1.7" />
-            <path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-            <circle cx="12" cy="15.2" r="1.2" fill="currentColor" />
-          </svg>
+          <img src="/logo-mark.png" alt="Maslah Academy AI" />
         </div>
 
         <h1>Maslah Academy AI</h1>
