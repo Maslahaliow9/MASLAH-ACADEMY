@@ -1,51 +1,53 @@
 /* Maslah Academy AI — design system
-   Calm ivory + deep emerald. Variable names kept so every existing
-   component keeps working: --ink (solid brand fill), --maroon (accent),
-   --parchment (page), --surface (cards). */
+   Deep navy + electric blue, matched to the logo.
+   Variable names kept so every existing component keeps working:
+   --ink (solid brand fill), --maroon (accent), --parchment (page),
+   --surface (cards). */
 
 :root {
-  --ink: #1f5e45;
-  --ink-soft: #5b6760;
-  --parchment: #faf9f5;
-  --parchment-deep: #f0eee6;
-  --maroon: #1f6b4a;
-  --maroon-soft: #a9cdb9;
-  --danger: #b83b3b;
-  --danger-soft: rgba(184, 59, 59, 0.12);
-  --line: #e5e2d8;
-  --text: #1f1e1b;
-  --text-muted: #76736a;
+  --ink: #0a2a66;
+  --ink-soft: #55627a;
+  --parchment: #f5f8ff;
+  --parchment-deep: #e7eefa;
+  --maroon: #1b6cf2;
+  --maroon-soft: #9fc3fb;
+  --danger: #c8372d;
+  --danger-soft: rgba(200, 55, 45, 0.12);
+  --line: #d9e3f3;
+  --text: #0c1830;
+  --text-muted: #66738c;
   --surface: #ffffff;
   --on-accent: #ffffff;
-  --user-bubble: #efece4;
-  --accent-rgb: 31, 107, 74;
-  --accent-hover: #175239;
+  --user-bubble: #e4edfc;
+  --accent-rgb: 27, 108, 242;
+  --accent-hover: #1456c4;
   --accent-tint: rgba(var(--accent-rgb), 0.09);
   --accent-tint-border: rgba(var(--accent-rgb), 0.25);
   --photo-hover-bg: rgba(var(--accent-rgb), 0.1);
   --shimmer-highlight: #ffffff;
+  --logo-bg: #020b1f;
   --radius: 12px;
-  --shadow-tint: 30, 30, 20;
+  --shadow-tint: 10, 25, 60;
 }
 
 html[data-theme="dark"] {
-  --ink: #5cba90;
-  --ink-soft: #b4b0a5;
-  --parchment: #1f1e1d;
-  --parchment-deep: #2a2927;
-  --maroon: #6cc49b;
-  --maroon-soft: #3f7a5f;
-  --danger: #e8685a;
-  --danger-soft: rgba(232, 104, 90, 0.15);
-  --line: #3a3936;
-  --text: #ece9e1;
-  --text-muted: #9b978c;
-  --surface: #262624;
-  --on-accent: #10261c;
-  --user-bubble: #33322f;
-  --accent-rgb: 108, 196, 155;
-  --accent-hover: #8dd8b4;
-  --shimmer-highlight: #3a3936;
+  --ink: #3d9bff;
+  --ink-soft: #a7b6d0;
+  --parchment: #060f24;
+  --parchment-deep: #0f2040;
+  --maroon: #3b9dff;
+  --maroon-soft: #2a5fa8;
+  --danger: #ff7366;
+  --danger-soft: rgba(255, 115, 102, 0.15);
+  --line: #1b3055;
+  --text: #e8f0ff;
+  --text-muted: #8fa3c4;
+  --surface: #0b1a36;
+  --on-accent: #03102a;
+  --user-bubble: #14284d;
+  --accent-rgb: 59, 157, 255;
+  --accent-hover: #6cb4ff;
+  --shimmer-highlight: #1b3055;
   --shadow-tint: 0, 0, 0;
 }
 
@@ -75,6 +77,25 @@ button { font-family: inherit; }
   max-width: 820px;
   margin: 0 auto;
   background: var(--parchment);
+}
+
+/* ---------- Logo images ---------- */
+
+.brand-mark,
+.hero-mark,
+.access-mark,
+.founder-mark.logo {
+  background: var(--logo-bg);
+  overflow: hidden;
+}
+.brand-mark img,
+.hero-mark img,
+.access-mark img,
+.founder-mark.logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 /* ---------- Header ---------- */
