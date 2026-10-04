@@ -7,7 +7,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
-      includeAssets: ["favicon.png", "logo-mark.png", "logo-full.png", "pwa-192.png", "pwa-512.png"],
+      includeAssets: ["favicon.png", "logo-mark.png", "icons/icon-192.png", "icons/icon-512.png"],
       manifest: {
         name: "Maslah Academy AI",
         short_name: "Maslah AI",
@@ -17,8 +17,8 @@ export default defineConfig({
         display: "standalone",
         start_url: "/",
         icons: [
-          { src: "pwa-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
-          { src: "pwa-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+          { src: "icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any maskable" },
+          { src: "icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
         ],
       },
     }),
