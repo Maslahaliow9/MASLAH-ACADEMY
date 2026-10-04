@@ -35,7 +35,9 @@ export default function About({ onBack }) {
           <p className="eyebrow">The team behind the app</p>
 
           <div className="founder-card">
-            <span className="founder-mark">M</span>
+            <span className="founder-mark logo">
+              <img src="/logo-mark.png" alt="Maslah Academy AI" />
+            </span>
             <div>
               <p className="founder-name">Maslah Aliow Abdow</p>
               <div className="founder-roles">
