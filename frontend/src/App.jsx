@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect } from "react";
-import { askQuestion, readImage, supabase } from "./lib/supabase.js";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { askQuestion, supabase } from "./lib/supabase.js";
 import Auth from "./Auth.jsx";
 import History from "./History.jsx";
 import About from "./About.jsx";
@@ -9,8 +11,7 @@ import PendingApproval from "./PendingApproval.jsx";
 const BOOKS = ["The Samaritan", "Fathers of Nations", "A Silent Song and Other Stories"];
 
 // General-knowledge subjects — answered from the AI's own knowledge,
-// not from an ingested book. Kept as a separate list from BOOKS so
-// the UI can group and label them honestly as not evidence-based.
+// not from an ingested book.
 const SUBJECTS = [
   "Chemistry", "Biology", "Physics", "Mathematics", "History",
   "Geography", "Business", "English", "Kiswahili", "Arabic",
@@ -34,9 +35,10 @@ const GENERAL_STARTER_PROMPTS = [
 ];
 
 const LOADING_MESSAGES = [
-  "Reading the evidence…",
+  "Reading the question…",
   "Working through it…",
-  "Drafting the answer…",
+  "Checking the facts…",
+  "Writing the answer…",
 ];
 
 const THEME_KEY = "maslah_theme";
@@ -47,24 +49,75 @@ const BOOKMARKS_KEY = "maslah_bookmarks";
 const ONBOARDED_KEY = "maslah_onboarded";
 const CHAT_SESSION_KEY = "maslah_chat_session";
 const MAX_PERSISTED_MESSAGES = 30;
+const MAX_IMAGES = 3;
 
-// A fixed, non-exam-answer prompt used only to populate the "About this
-// book" panel — grounded in the same setbook evidence as every other
-// answer, never facts invented client-side.
 const BOOK_INFO_PROMPT =
-  "Give a brief, spoiler-light overview of the main characters and central themes of this setbook, in about 120 words, as plain flowing text with no headings.";
+  "Give a brief, spoiler-light overview of the main characters and central themes of this setbook, in about 120 words, as flowing text with no headings.";
+
+// Removes markdown symbols so read-aloud doesn't say "asterisk".
+const stripMd = (t) => String(t || "").replace(/[*_`#>]/g, "").replace(/\n{2,}/g, ". ");
+
+function Markdown({ children }) {
+  return (
+    <div className="markdown">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children || ""}</ReactMarkdown>
+    </div>
+  );
+}
+
+const Icon = {
+  plus: (
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  ),
+  camera: (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round">
+      <path d="M4 8.5C4 7.7 4.7 7 5.5 7h2.3l.8-1.4c.3-.5.8-.8 1.3-.8h4.2c.5 0 1 .3 1.3.8l.8 1.4h2.3c.8 0 1.5.7 1.5 1.5v9c0 .8-.7 1.5-1.5 1.5h-13c-.8 0-1.5-.7-1.5-1.5v-9Z" />
+      <circle cx="12" cy="13" r="3.2" />
+    </svg>
+  ),
+  image: (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="5" width="16" height="14" rx="2" />
+      <circle cx="9" cy="10" r="1.4" />
+      <path d="M4 16l4.5-4 4 3.5 2.5-2L20 17" />
+    </svg>
+  ),
+  file: (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 3H7.5A1.5 1.5 0 0 0 6 4.5v15A1.5 1.5 0 0 0 7.5 21h9a1.5 1.5 0 0 0 1.5-1.5V7l-4-4Z" />
+      <path d="M14 3v4h4" />
+    </svg>
+  ),
+  send: (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" />
+    </svg>
+  ),
+  close: (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+      <path d="M6 6l12 12M18 6L6 18" />
+    </svg>
+  ),
+  trash: (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4.5 7h15M9.5 7V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2M18 7l-.7 12.1a1.5 1.5 0 0 1-1.5 1.4H8.2a1.5 1.5 0 0 1-1.5-1.4L6 7" />
+    </svg>
+  ),
+};
 
 export default function App() {
   const [granted, setGranted] = useState(hasAccess());
   const [session, setSession] = useState(undefined); // undefined = checking, null = logged out
-  const [approvalStatus, setApprovalStatus] = useState(undefined); // undefined = checking, "pending" | "approved" | null (no request found)
+  const [approvalStatus, setApprovalStatus] = useState(undefined);
   const [pendingCode, setPendingCode] = useState(null);
   const [view, setView] = useState("chat"); // "chat" | "history" | "about"
   const [book, setBook] = useState(BOOKS[0]);
   const [messages, setMessages] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(CHAT_SESSION_KEY) || "[]");
-      return saved.map((m) => (m.image ? { ...m, image: null } : m));
+      return saved.map((m) => (m.images ? { ...m, images: null } : m));
     } catch {
       return [];
     }
@@ -74,6 +127,7 @@ export default function App() {
   const scrollRef = useRef(null);
   const cameraInputRef = useRef(null);
   const uploadInputRef = useRef(null);
+  const fileInputRef = useRef(null);
   const textareaRef = useRef(null);
 
   const [theme, setTheme] = useState(() => {
@@ -111,6 +165,12 @@ export default function App() {
   );
   const [loadingStep, setLoadingStep] = useState(0);
 
+  // Attachments staged in the composer (sent together with the message)
+  const [attachments, setAttachments] = useState([]); // [{ id, dataUrl, name }]
+  const [fileAttachment, setFileAttachment] = useState(null); // { name, text }
+  const [attachError, setAttachError] = useState("");
+  const [showAttachMenu, setShowAttachMenu] = useState(false);
+
   useEffect(() => {
     if (!loading) {
       setLoadingStep(0);
@@ -118,18 +178,9 @@ export default function App() {
     }
     const interval = setInterval(() => {
       setLoadingStep((s) => (s + 1) % LOADING_MESSAGES.length);
-    }, 1800);
+    }, 2200);
     return () => clearInterval(interval);
   }, [loading]);
-
-  // Image capture/upload flow: a photo is staged for preview and
-  // captioning before it's actually submitted, rather than firing
-  // off the moment it's picked.
-  const [pendingImage, setPendingImage] = useState(null); // { dataUrl, blob } | null
-  const [extractedText, setExtractedText] = useState("");
-  const [imageCaption, setImageCaption] = useState("");
-  const [extracting, setExtracting] = useState(false);
-  const [imageError, setImageError] = useState("");
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -139,8 +190,7 @@ export default function App() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
-  // Once logged in, check whether this account has been approved
-  // by the founder yet.
+  // Once logged in, check whether this account has been approved.
   useEffect(() => {
     if (!session) {
       setApprovalStatus(session === null ? null : undefined);
@@ -176,7 +226,7 @@ export default function App() {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
   }, [input]);
 
   useEffect(() => {
@@ -239,23 +289,25 @@ export default function App() {
   useEffect(() => {
     try {
       const toStore = messages.slice(-MAX_PERSISTED_MESSAGES).map((m) => {
-        if (!m.image) return m;
-        const { image, ...rest } = m;
+        if (!m.images) return m;
+        const { images, ...rest } = m;
         return rest;
       });
       localStorage.setItem(CHAT_SESSION_KEY, JSON.stringify(toStore));
     } catch {
-      // Storage unavailable or full — the live session still works,
-      // it just won't survive a reload.
+      // Storage unavailable or full — the live session still works.
     }
   }, [messages]);
 
   function clearConversation() {
-    // Only clears the currently selected subject's messages — other
-    // subjects' history is untouched. The persistence effect above
-    // re-saves automatically whenever messages changes, so no extra
-    // localStorage call is needed here.
+    // Only clears the currently selected subject's messages.
     setMessages((prev) => prev.filter((m) => m.book !== book));
+  }
+
+  function confirmClear() {
+    if (window.confirm(`Clear your ${book} conversation? Other subjects and saved answers won't be affected.`)) {
+      clearConversation();
+    }
   }
 
   function toggleBookmark(message) {
@@ -307,7 +359,7 @@ export default function App() {
       return;
     }
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
+    const utterance = new SpeechSynthesisUtterance(stripMd(text));
     utterance.onend = () => setSpeakingIndex(null);
     utterance.onerror = () => setSpeakingIndex(null);
     window.speechSynthesis.speak(utterance);
@@ -337,26 +389,47 @@ export default function App() {
   }
 
   function retryFailedMessage(message) {
-    if (!message.retryQuestion) return;
-    handleSubmit(message.retryQuestion, message.book);
+    const p = message.retryPayload;
+    if (!p) return;
+    handleSubmit(p.typed, message.book, { images: p.images, fileText: p.fileText });
   }
 
-  async function handleSubmit(question, questionBook, attachedImage) {
-    const q = (question ?? input).trim();
-    if (!q || loading) return;
+  // override = { images, fileText } is used for retries.
+  async function handleSubmit(question, questionBook, override) {
+    const typed = (question ?? input).trim();
+    const imgs = override?.images ?? attachments.map((a) => a.dataUrl);
+    const fText = override?.fileText ?? fileAttachment?.text ?? "";
+    const fileName = fileAttachment?.name;
+
+    if ((!typed && imgs.length === 0 && !fText) || loading) return;
+
     const targetBook = questionBook ?? book;
     if (questionBook && questionBook !== book) setBook(questionBook);
     setView("chat");
     setInput("");
-    setMessages((m) => [...m, { role: "student", text: q, book: targetBook, image: attachedImage }]);
+    setAttachments([]);
+    setFileAttachment(null);
+    setAttachError("");
+    setShowAttachMenu(false);
+
+    const shownText =
+      typed ||
+      (imgs.length
+        ? "Please answer the question(s) in this photo."
+        : `Please answer the questions in ${fileName || "this file"}.`);
+
+    setMessages((m) => [...m, { role: "student", text: shownText, book: targetBook, images: imgs }]);
     setLoading(true);
     try {
       const recentHistory = messages
         .filter((m) => (m.role === "student" || m.role === "assistant") && m.book === targetBook)
         .slice(-6)
-        .map((m) => ({ role: m.role, text: m.text }));
+        .map((m) => ({ role: m.role === "student" ? "student" : "ai", text: m.text }));
 
-      const data = await askQuestion(q, targetBook, recentHistory);
+      const data = await askQuestion(typed, targetBook, recentHistory, {
+        images: imgs,
+        fileText: fText,
+      });
       setMessages((m) => [
         ...m,
         {
@@ -366,19 +439,23 @@ export default function App() {
           book: targetBook,
           groundedInEvidence: data.groundedInEvidence,
           higherRiskSubject: data.higherRiskSubject,
+          transcribed: data.transcribedQuestion,
         },
       ]);
     } catch (err) {
+      console.error(err);
       setMessages((m) => [
         ...m,
         {
           role: "error",
-          text: "Something went wrong retrieving that answer. Please try again.",
+          text:
+            err?.message && err.message.length < 220
+              ? err.message
+              : "Something went wrong. Please try again.",
           book: targetBook,
-          retryQuestion: q,
+          retryPayload: { typed, images: imgs, fileText: fText },
         },
       ]);
-      console.error(err);
     } finally {
       setLoading(false);
     }
@@ -420,54 +497,39 @@ export default function App() {
     });
   }
 
-  async function handleImageFile(file) {
-    if (!file) return;
-    setImageError("");
-    try {
-      const resizedBlob = await resizeImage(file, 1600, 0.75);
-      const dataUrl = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = () => reject(new Error("Could not read that file."));
-        reader.readAsDataURL(resizedBlob);
-      });
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error("Could not read that file."));
+      reader.readAsDataURL(blob);
+    });
+  }
 
-      setPendingImage({ dataUrl, blob: resizedBlob });
-      setExtractedText("");
-      setImageCaption("");
-      setExtracting(true);
-
-      const base64 = dataUrl.split(",")[1];
-      const data = await readImage(base64, "image/jpeg");
-      setExtractedText(data.text);
-    } catch (err) {
-      console.error(err);
-      setImageError("Couldn't read that photo — you can retake it, or remove it and type the question instead.");
-    } finally {
-      setExtracting(false);
+  async function handleFiles(fileList) {
+    setAttachError("");
+    setShowAttachMenu(false);
+    for (const file of Array.from(fileList || [])) {
+      try {
+        if (file.type.startsWith("image/")) {
+          const blob = await resizeImage(file, 1600, 0.8);
+          const dataUrl = await blobToDataUrl(blob);
+          setAttachments((prev) =>
+            prev.length >= MAX_IMAGES
+              ? prev
+              : [...prev, { id: `${Date.now()}-${Math.random()}`, dataUrl, name: file.name }]
+          );
+        } else if (file.type === "text/plain" || file.name.toLowerCase().endsWith(".txt")) {
+          const text = await file.text();
+          setFileAttachment({ name: file.name, text: text.slice(0, 15000) });
+        } else {
+          setAttachError("Please attach a photo or a .txt file.");
+        }
+      } catch (err) {
+        console.error(err);
+        setAttachError("Couldn't load that file. Please try again.");
+      }
     }
-  }
-
-  function clearPendingImage() {
-    setPendingImage(null);
-    setExtractedText("");
-    setImageCaption("");
-    setImageError("");
-  }
-
-  function retakePhoto() {
-    clearPendingImage();
-    cameraInputRef.current?.click();
-  }
-
-  function submitImageQuestion() {
-    if (!extractedText.trim() || extracting) return;
-    const combined = imageCaption.trim()
-      ? `${extractedText.trim()}\n\nQuestion: ${imageCaption.trim()}`
-      : `${extractedText.trim()}\n\nAnswer this using evidence from the excerpt above.`;
-    const thumbnail = pendingImage?.dataUrl;
-    clearPendingImage();
-    handleSubmit(combined, undefined, thumbnail);
   }
 
   if (!granted) {
@@ -514,6 +576,11 @@ export default function App() {
   if (view === "about") {
     return <About onBack={() => setView("chat")} />;
   }
+
+  const visibleMessages = messages.filter((m) => m.book === book);
+  const hasMessagesHere = visibleMessages.length > 0;
+  const canSend =
+    !loading && !isOffline && (input.trim() || attachments.length > 0 || fileAttachment);
 
   return (
     <div className="app">
@@ -566,15 +633,11 @@ export default function App() {
               </svg>
               <span>Saved</span>
             </button>
-            {messages.some((m) => m.book === book) && (
+            {hasMessagesHere && (
               <button
-                className="icon-nav-btn"
+                className="icon-nav-btn hide-sm"
                 title="Clear this subject's conversation"
-                onClick={() => {
-                  if (window.confirm(`Clear your ${book} conversation? Other subjects and saved bookmarks won't be affected.`)) {
-                    clearConversation();
-                  }
-                }}
+                onClick={confirmClear}
               >
                 <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                   <path d="M4.5 7h15M9.5 7V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2M18 7l-.7 12.1a1.5 1.5 0 0 1-1.5 1.4H8.2a1.5 1.5 0 0 1-1.5-1.4L6 7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -640,11 +703,8 @@ export default function App() {
               Save answers for revision
             </span>
             <span className="onboarding-item">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="9.2" />
-                <path d="M12 11v5.5M12 8v.01" />
-              </svg>
-              Get a setbook overview
+              {Icon.camera}
+              Snap a question and get it answered
             </span>
             <span className="onboarding-item">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -660,69 +720,68 @@ export default function App() {
       )}
 
       <main className="chat" ref={scrollRef}>
-        {(() => {
-          // Only show messages that belong to the currently selected
-          // setbook/subject — switching subjects in the sidebar now
-          // shows that subject's own history, not everything mixed
-          // together. Nothing is deleted from state, just filtered
-          // for display, so switching back restores it.
-          const visibleMessages = messages.filter((m) => m.book === book);
-          return (
-            <>
-              {visibleMessages.length === 0 && (
-                <div className="empty-state hero">
-                  <div className="hero-mark">M</div>
-                  <p className="eyebrow">Currently studying</p>
-                  <h2>{book}</h2>
-                  {BOOKS.includes(book) ? (
-                    <>
-                      <span className="grounding-badge evidence">Evidence-based</span>
-                      <p className="hint">
-                        Ask an essay question, an excerpt-based question, or a question on character,
-                        theme, or style. Every answer is built from evidence in the actual text.
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <span className="grounding-badge general">General knowledge</span>
-                      <p className="hint">
-                        Ask any {book} question. There's no ingested textbook for this subject, so
-                        answers come from general AI knowledge rather than a cited source
-                        {HIGHER_RISK_SUBJECTS.includes(book) ? " — worth double-checking precise details." : "."}
-                      </p>
-                    </>
-                  )}
-                  <div className="starters">
-                    {(BOOKS.includes(book) ? STARTER_PROMPTS : GENERAL_STARTER_PROMPTS).map((p, idx) => (
-                      <button
-                        key={p}
-                        className="starter"
-                        style={{ animationDelay: `${idx * 0.08 + 0.15}s` }}
-                        onClick={() => handleSubmit(p)}
-                      >
-                        {p}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
+        {visibleMessages.length === 0 && (
+          <div className="empty-state hero">
+            <div className="hero-mark">M</div>
+            <p className="eyebrow">Currently studying</p>
+            <h2>{book}</h2>
+            {BOOKS.includes(book) ? (
+              <>
+                <span className="grounding-badge evidence">Evidence-based</span>
+                <p className="hint">
+                  Ask an essay question, an excerpt-based question, or a question on character,
+                  theme, or style. You can also snap a photo of the question. Every answer is built
+                  from evidence in the actual text.
+                </p>
+              </>
+            ) : (
+              <>
+                <span className="grounding-badge general">General knowledge</span>
+                <p className="hint">
+                  Ask any {book} question, or snap a photo of it. There's no ingested textbook for
+                  this subject, so answers come from general AI knowledge rather than a cited source
+                  {HIGHER_RISK_SUBJECTS.includes(book) ? " — worth double-checking precise details." : "."}
+                </p>
+              </>
+            )}
+            <div className="starters">
+              {(BOOKS.includes(book) ? STARTER_PROMPTS : GENERAL_STARTER_PROMPTS).map((p, idx) => (
+                <button
+                  key={p}
+                  className="starter"
+                  style={{ animationDelay: `${idx * 0.08 + 0.15}s` }}
+                  onClick={() => handleSubmit(p)}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
-              {visibleMessages.map((m, i) => (
+        {visibleMessages.map((m, i) => (
           <div key={i} className={`bubble-row ${m.role}`}>
             {m.role === "student" && (
               <div className="bubble student">
-                {m.image && <img src={m.image} alt="Submitted question" className="bubble-image" />}
+                {m.images?.length > 0 && (
+                  <div className="bubble-images">
+                    {m.images.map((src, k) => (
+                      <img key={k} src={src} alt="Attached question" className="bubble-image" />
+                    ))}
+                  </div>
+                )}
                 {m.text}
               </div>
             )}
+
             {m.role === "error" && (
               <div className="bubble error">
                 <p className="error-text">{m.text}</p>
-                {m.retryQuestion && (
+                {m.retryPayload && (
                   <button
                     type="button"
                     className="retry-btn"
-                    disabled={loading || extracting || isOffline}
+                    disabled={loading || isOffline}
                     onClick={() => retryFailedMessage(m)}
                   >
                     <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
@@ -734,6 +793,7 @@ export default function App() {
                 )}
               </div>
             )}
+
             {m.role === "assistant" && (
               <div className="bubble assistant">
                 <div className="answer-toolbar">
@@ -795,16 +855,16 @@ export default function App() {
                     </button>
                   </div>
                 </div>
-                <div className="answer-text">
-                  {m.text
-                    .split(/\n{2,}/)
-                    .filter((p) => p.trim())
-                    .map((paragraph, k) => (
-                      <p key={k} className="answer-paragraph">
-                        {paragraph}
-                      </p>
-                    ))}
-                </div>
+
+                <Markdown>{m.text}</Markdown>
+
+                {m.transcribed && (
+                  <details className="evidence">
+                    <summary>What the AI read from your upload</summary>
+                    <p style={{ whiteSpace: "pre-wrap" }}>{m.transcribed}</p>
+                  </details>
+                )}
+
                 {m.evidence?.length > 0 && (
                   <details className="evidence">
                     <summary>Evidence used ({m.evidence.length})</summary>
@@ -821,10 +881,7 @@ export default function App() {
               </div>
             )}
           </div>
-              ))}
-            </>
-          );
-        })()}
+        ))}
 
         {loading && (
           <div className="bubble-row assistant">
@@ -843,139 +900,135 @@ export default function App() {
         accept="image/*"
         capture="environment"
         ref={cameraInputRef}
-        style={{ display: "none" }}
+        hidden
         onChange={(e) => {
-          handleImageFile(e.target.files?.[0]);
+          handleFiles(e.target.files);
           e.target.value = "";
         }}
       />
       <input
         type="file"
         accept="image/*"
+        multiple
         ref={uploadInputRef}
-        style={{ display: "none" }}
+        hidden
         onChange={(e) => {
-          handleImageFile(e.target.files?.[0]);
+          handleFiles(e.target.files);
+          e.target.value = "";
+        }}
+      />
+      <input
+        type="file"
+        accept=".txt,text/plain"
+        ref={fileInputRef}
+        hidden
+        onChange={(e) => {
+          handleFiles(e.target.files);
           e.target.value = "";
         }}
       />
 
-      {pendingImage ? (
-        <div className="image-preview-panel">
-          <div className="image-preview-header">
-            <span>Photo question</span>
-            <button type="button" className="image-preview-close" onClick={clearPendingImage} title="Remove photo">
-              ✕
-            </button>
-          </div>
-
-          <div className="image-preview-body">
-            <img src={pendingImage.dataUrl} alt="Selected question" className="image-preview-thumb" />
-
-            <div className="image-preview-text">
-              {extracting ? (
-                <div className="extracting-row">
-                  <span className="dot" />
-                  <span className="dot" />
-                  <span className="dot" />
-                  <span className="extracting-label">Reading text from photo…</span>
+      <form
+        className="composer"
+        onSubmit={(e) => {
+          e.preventDefault();
+          handleSubmit();
+        }}
+      >
+        <div className="composer-box">
+          {(attachments.length > 0 || fileAttachment) && (
+            <div className="attach-row">
+              {attachments.map((a) => (
+                <div className="attach-chip image" key={a.id}>
+                  <img src={a.dataUrl} alt="" />
+                  <button
+                    type="button"
+                    title="Remove"
+                    onClick={() => setAttachments((p) => p.filter((x) => x.id !== a.id))}
+                  >
+                    {Icon.close}
+                  </button>
                 </div>
-              ) : (
-                <textarea
-                  className="extracted-text"
-                  value={extractedText}
-                  onChange={(e) => setExtractedText(e.target.value)}
-                  rows={4}
-                  placeholder="Extracted text will appear here — check it, then edit anything that looks wrong."
-                />
+              ))}
+              {fileAttachment && (
+                <div className="attach-chip file">
+                  {Icon.file}
+                  <span>{fileAttachment.name}</span>
+                  <button type="button" title="Remove" onClick={() => setFileAttachment(null)}>
+                    {Icon.close}
+                  </button>
+                </div>
               )}
-              <input
-                className="image-caption-input"
-                type="text"
-                value={imageCaption}
-                onChange={(e) => setImageCaption(e.target.value)}
-                placeholder='Question (optional) — e.g. "Answer this using evidence from The Samaritan"'
-              />
             </div>
-          </div>
+          )}
 
-          <div className="image-preview-actions">
-            <button type="button" className="image-action-btn" onClick={retakePhoto}>
-              Retake
-            </button>
-            <button type="button" className="image-action-btn" onClick={clearPendingImage}>
-              Remove
-            </button>
-            <button
-              type="button"
-              className="image-action-btn primary"
-              disabled={extracting || !extractedText.trim() || loading || isOffline}
-              onClick={submitImageQuestion}
-            >
-              Submit
-            </button>
-          </div>
-        </div>
-      ) : (
-        <form
-          className="composer"
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleSubmit();
-          }}
-        >
-          <button
-            type="button"
-            className="photo-btn"
-            title="Take a photo of a question"
-            disabled={isOffline}
-            onClick={() => cameraInputRef.current?.click()}
-          >
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path
-                d="M4 8.5C4 7.67 4.67 7 5.5 7H7.8L8.55 5.6C8.81 5.11 9.32 4.8 9.87 4.8H14.13C14.68 4.8 15.19 5.11 15.45 5.6L16.2 7H18.5C19.33 7 20 7.67 20 8.5V17.5C20 18.33 19.33 19 18.5 19H5.5C4.67 19 4 18.33 4 17.5V8.5Z"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinejoin="round"
-              />
-              <circle cx="12" cy="13" r="3.2" stroke="currentColor" strokeWidth="1.5" />
-            </svg>
-            <span>Camera</span>
-          </button>
-          <button
-            type="button"
-            className="photo-btn"
-            title="Upload a photo"
-            disabled={isOffline}
-            onClick={() => uploadInputRef.current?.click()}
-          >
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect x="4" y="5" width="16" height="14" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
-              <path d="M4 15.5L8.5 11.5C9.02 11.03 9.8 11.03 10.3 11.5L13 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              <path d="M12.5 14L14.7 12C15.22 11.53 16 11.53 16.5 12L20 15" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              <circle cx="8.3" cy="8.7" r="1.3" stroke="currentColor" strokeWidth="1.5" />
-            </svg>
-            <span>Upload</span>
-          </button>
           <textarea
             ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={`Ask a question on ${book}...`}
+            placeholder={`Message Maslah Academy AI about ${book}`}
             rows={1}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
+              if (e.key === "Enter" && !e.shiftKey && window.innerWidth > 700) {
                 e.preventDefault();
                 handleSubmit();
               }
             }}
           />
-          <button type="submit" disabled={loading || isOffline || !input.trim()}>
-            Ask
-          </button>
-        </form>
-      )}
-      {imageError && <p className="image-error">{imageError}</p>}
+
+          <div className="composer-actions">
+            <div className="attach-wrap">
+              <button
+                type="button"
+                className="round-btn ghost"
+                title="Add photo or file"
+                disabled={isOffline}
+                onClick={() => setShowAttachMenu((s) => !s)}
+              >
+                {Icon.plus}
+              </button>
+              {showAttachMenu && (
+                <>
+                  <div className="menu-backdrop" onClick={() => setShowAttachMenu(false)} />
+                  <div className="attach-menu">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowAttachMenu(false);
+                        cameraInputRef.current?.click();
+                      }}
+                    >
+                      {Icon.camera}Take a photo
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowAttachMenu(false);
+                        uploadInputRef.current?.click();
+                      }}
+                    >
+                      {Icon.image}Upload photos
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowAttachMenu(false);
+                        fileInputRef.current?.click();
+                      }}
+                    >
+                      {Icon.file}Upload text file
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+            <button type="submit" className="round-btn send" title="Send" disabled={!canSend}>
+              {Icon.send}
+            </button>
+          </div>
+        </div>
+        {attachError && <p className="image-error">{attachError}</p>}
+      </form>
 
       {showSidebar && (
         <div className="sidebar-overlay" onClick={() => setShowSidebar(false)}>
@@ -1053,6 +1106,19 @@ export default function App() {
                   )}
                 </button>
               ))}
+
+              {hasMessagesHere && (
+                <button
+                  className="sidebar-clear"
+                  onClick={() => {
+                    setShowSidebar(false);
+                    confirmClear();
+                  }}
+                >
+                  {Icon.trash}
+                  Clear this conversation
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -1114,7 +1180,9 @@ export default function App() {
                               </svg>
                             </button>
                           </div>
-                          <p className="bookmark-text">{b.text}</p>
+                          <div className="bookmark-text">
+                            <Markdown>{b.text}</Markdown>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -1147,18 +1215,7 @@ export default function App() {
             {bookInfo[book]?.error && (
               <p className="overlay-empty">Couldn't load an overview right now — please try again.</p>
             )}
-            {bookInfo[book]?.text && (
-              <div className="answer-text">
-                {bookInfo[book].text
-                  .split(/\n{2,}/)
-                  .filter((p) => p.trim())
-                  .map((paragraph, k) => (
-                    <p key={k} className="answer-paragraph">
-                      {paragraph}
-                    </p>
-                  ))}
-              </div>
-            )}
+            {bookInfo[book]?.text && <Markdown>{bookInfo[book].text}</Markdown>}
           </div>
         </div>
       )}
