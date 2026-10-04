@@ -20,6 +20,38 @@ const SUBJECTS = [
 
 const HIGHER_RISK_SUBJECTS = ["Kiswahili", "Arabic", "IRE", "CRE", "HRE"];
 
+// KCSE English Writing — answered from the KNEC marking scheme by the
+// ask-question function. These two names are sent as the "book" value.
+const COMPOSITION = "Imaginative Composition";
+const FUNCTIONAL = "Functional Writing";
+const WRITING_AREAS = [COMPOSITION, FUNCTIONAL];
+const isWriting = (name) => WRITING_AREAS.includes(name);
+
+const FUNCTIONAL_FORMS = [
+  "Formal letter",
+  "Informal letter",
+  "Application letter",
+  "Complaint letter",
+  "Invitation",
+  "Report",
+  "Internal memo",
+  "Notice",
+  "Speech",
+  "Minutes",
+  "Agenda",
+  "Advertisement",
+  "Dialogue",
+  "Interview",
+  "Email",
+  "Instructions",
+  "Recipe",
+  "Announcement",
+  "Curriculum Vitae (CV)",
+  "Biography",
+  "Autobiography",
+  "Diary / journal entry",
+];
+
 const STARTER_PROMPTS = [
   "Discuss the theme of betrayal.",
   "Analyze the character of the protagonist.",
@@ -33,6 +65,23 @@ const GENERAL_STARTER_PROMPTS = [
   "What are the most commonly examined points here?",
   "Summarize this for quick revision.",
 ];
+
+const COMPOSITION_STARTER_PROMPTS = [
+  "Give me a KCSE narrative composition question.",
+  "Give me a KCSE discursive composition question.",
+  "How do I start and end a narrative composition?",
+  "What does an A-class composition look like?",
+];
+
+function functionalStarters(form) {
+  const f = form ? form.toLowerCase() : "report";
+  return [
+    `Give me a KCSE ${f} question.`,
+    `Show me the correct format of a ${f}.`,
+    `What mistakes lose marks in a ${f}?`,
+    "How is functional writing marked?",
+  ];
+}
 
 const LOADING_MESSAGES = [
   "Reading the question…",
@@ -48,6 +97,7 @@ const STREAK_MILESTONES = [3, 7, 14, 30, 60, 100];
 const BOOKMARKS_KEY = "maslah_bookmarks";
 const ONBOARDED_KEY = "maslah_onboarded";
 const CHAT_SESSION_KEY = "maslah_chat_session";
+const WRITING_FORM_KEY = "maslah_writing_form";
 const MAX_PERSISTED_MESSAGES = 30;
 const MAX_IMAGES = 3;
 
@@ -57,9 +107,11 @@ const BOOK_INFO_PROMPT =
 // Removes markdown symbols so read-aloud doesn't say "asterisk".
 const stripMd = (t) => String(t || "").replace(/[*_`#>]/g, "").replace(/\n{2,}/g, ". ");
 
-function Markdown({ children }) {
+// className="writing" keeps single line breaks, so letter, memo, minutes
+// and CV layouts show exactly as they should.
+function Markdown({ children, className = "" }) {
   return (
-    <div className="markdown">
+    <div className={`markdown ${className}`.trim()}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{children || ""}</ReactMarkdown>
     </div>
   );
@@ -103,6 +155,12 @@ const Icon = {
   trash: (
     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M4.5 7h15M9.5 7V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2M18 7l-.7 12.1a1.5 1.5 0 0 1-1.5 1.4H8.2a1.5 1.5 0 0 1-1.5-1.4L6 7" />
+    </svg>
+  ),
+  pen: (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 20l1-4L16.5 4.5a2 2 0 0 1 2.8 0l.2.2a2 2 0 0 1 0 2.8L8 19l-4 1Z" />
+      <path d="M14.5 6.5l3 3" />
     </svg>
   ),
 };
@@ -164,6 +222,15 @@ export default function App() {
     typeof navigator !== "undefined" ? !navigator.onLine : false
   );
   const [loadingStep, setLoadingStep] = useState(0);
+
+  // Functional Writing: which form the student is working on ("" = let the AI detect it)
+  const [writingForm, setWritingForm] = useState(() => {
+    try {
+      return localStorage.getItem(WRITING_FORM_KEY) || "";
+    } catch {
+      return "";
+    }
+  });
 
   // Attachments staged in the composer (sent together with the message)
   const [attachments, setAttachments] = useState([]); // [{ id, dataUrl, name }]
@@ -237,6 +304,14 @@ export default function App() {
       // Storage unavailable — theme still applies for this session.
     }
   }, [theme]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(WRITING_FORM_KEY, writingForm);
+    } catch {
+      // Storage unavailable — the selection still works for this session.
+    }
+  }, [writingForm]);
 
   useEffect(() => {
     try {
@@ -426,7 +501,14 @@ export default function App() {
         .slice(-6)
         .map((m) => ({ role: m.role === "student" ? "student" : "ai", text: m.text }));
 
-      const data = await askQuestion(typed, targetBook, recentHistory, {
+      // Functional Writing: tell the AI which form the student chose.
+      // (The chat bubble still shows only what the student typed.)
+      const apiQuestion =
+        targetBook === FUNCTIONAL && writingForm
+          ? `Writing form: ${writingForm}\n\n${typed}`
+          : typed;
+
+      const data = await askQuestion(apiQuestion, targetBook, recentHistory, {
         images: imgs,
         fileText: fText,
       });
@@ -582,6 +664,24 @@ export default function App() {
   const canSend =
     !loading && !isOffline && (input.trim() || attachments.length > 0 || fileAttachment);
 
+  const inBooks = BOOKS.includes(book);
+  const inWriting = isWriting(book);
+  const inFunctional = book === FUNCTIONAL;
+
+  const starterList = inBooks
+    ? STARTER_PROMPTS
+    : book === COMPOSITION
+    ? COMPOSITION_STARTER_PROMPTS
+    : inFunctional
+    ? functionalStarters(writingForm)
+    : GENERAL_STARTER_PROMPTS;
+
+  const composerPlaceholder = inWriting
+    ? book === COMPOSITION
+      ? "Paste a composition topic, or ask for a practice question"
+      : "Paste your question, or ask for a practice question"
+    : `Message Maslah Academy AI about ${book}`;
+
   return (
     <div className="app">
       <header className="topbar">
@@ -595,7 +695,7 @@ export default function App() {
           <div>
             <h1>Maslah Academy AI</h1>
             <p className="tagline current-subject" onClick={() => setShowSidebar(true)}>
-              {book}
+              {inWriting ? `English Writing · ${book}` : book}
               <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M6 9l6 6 6-6" />
               </svg>
@@ -723,15 +823,34 @@ export default function App() {
         {visibleMessages.length === 0 && (
           <div className="empty-state hero">
             <div className="hero-mark"><img src="/logo-mark.png" alt="" /></div>
-            <p className="eyebrow">Currently studying</p>
+            <p className="eyebrow">{inWriting ? "KCSE English Writing" : "Currently studying"}</p>
             <h2>{book}</h2>
-            {BOOKS.includes(book) ? (
+            {inBooks ? (
               <>
                 <span className="grounding-badge evidence">Evidence-based</span>
                 <p className="hint">
                   Ask an essay question, an excerpt-based question, or a question on character,
                   theme, or style. You can also snap a photo of the question. Every answer is built
                   from evidence in the actual text.
+                </p>
+              </>
+            ) : book === COMPOSITION ? (
+              <>
+                <span className="grounding-badge evidence">KCSE marking scheme</span>
+                <p className="hint">
+                  Paste a composition topic, or snap a photo of it, and get a model composition
+                  written to the KNEC standard: the given line used exactly, a strong plot and a
+                  clear moral, within 450 words. You can also ask for a practice question or for
+                  advice on scoring in the A class.
+                </p>
+              </>
+            ) : inFunctional ? (
+              <>
+                <span className="grounding-badge evidence">KCSE marking scheme</span>
+                <p className="hint">
+                  Pick the writing form below, then paste or snap your question. The answer follows
+                  the exact KNEC format for that form, covers every requirement, and keeps to a
+                  formal, correct style. You can also ask for a practice question or a format guide.
                 </p>
               </>
             ) : (
@@ -745,7 +864,7 @@ export default function App() {
               </>
             )}
             <div className="starters">
-              {(BOOKS.includes(book) ? STARTER_PROMPTS : GENERAL_STARTER_PROMPTS).map((p, idx) => (
+              {starterList.map((p, idx) => (
                 <button
                   key={p}
                   className="starter"
@@ -799,7 +918,10 @@ export default function App() {
                 <div className="answer-toolbar">
                   <div className="answer-label">
                     Maslah AI — {m.book}
-                    {m.groundedInEvidence === false && (
+                    {m.groundedInEvidence === false && isWriting(m.book) && (
+                      <span className="grounding-badge inline evidence">KCSE marking scheme</span>
+                    )}
+                    {m.groundedInEvidence === false && !isWriting(m.book) && (
                       <span className={`grounding-badge inline ${m.higherRiskSubject ? "risk" : "general"}`}>
                         {m.higherRiskSubject ? "General knowledge — verify specifics" : "General knowledge"}
                       </span>
@@ -856,7 +978,7 @@ export default function App() {
                   </div>
                 </div>
 
-                <Markdown>{m.text}</Markdown>
+                <Markdown className={isWriting(m.book) ? "writing" : ""}>{m.text}</Markdown>
 
                 {m.transcribed && (
                   <details className="evidence">
@@ -935,6 +1057,31 @@ export default function App() {
           handleSubmit();
         }}
       >
+        {inFunctional && (
+          <div className="form-bar">
+            <label htmlFor="writing-form-select" className="form-bar-label">
+              {Icon.pen}
+              <span>Writing form</span>
+            </label>
+            <div className="form-select-wrap">
+              <select
+                id="writing-form-select"
+                className="form-select"
+                value={writingForm}
+                onChange={(e) => setWritingForm(e.target.value)}
+              >
+                <option value="">Not sure — detect it from my question</option>
+                {FUNCTIONAL_FORMS.map((f) => (
+                  <option key={f} value={f}>{f}</option>
+                ))}
+              </select>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="form-select-chevron">
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </div>
+          </div>
+        )}
+
         <div className="composer-box">
           {(attachments.length > 0 || fileAttachment) && (
             <div className="attach-row">
@@ -966,7 +1113,7 @@ export default function App() {
             ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={`Message Maslah Academy AI about ${book}`}
+            placeholder={composerPlaceholder}
             rows={1}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey && window.innerWidth > 700) {
@@ -1066,7 +1213,7 @@ export default function App() {
                 </button>
               ))}
 
-              {BOOKS.includes(book) && (
+              {inBooks && (
                 <button
                   className="sidebar-subaction"
                   onClick={() => {
@@ -1106,6 +1253,41 @@ export default function App() {
                   )}
                 </button>
               ))}
+
+              {/* KCSE English Writing — directly under Subjects */}
+              <div className={`writing-card ${inWriting ? "active" : ""}`}>
+                <div className="writing-card-head">
+                  <span className="writing-card-icon">{Icon.pen}</span>
+                  <div>
+                    <p className="writing-card-title">KCSE English Writing</p>
+                    <p className="writing-card-sub">Compositions and functional writing, the KCSE way.</p>
+                  </div>
+                </div>
+                <div className="writing-card-options">
+                  {WRITING_AREAS.map((area) => (
+                    <button
+                      key={area}
+                      type="button"
+                      className={`writing-option ${book === area ? "active" : ""}`}
+                      onClick={() => {
+                        setBook(area);
+                        setShowSidebar(false);
+                      }}
+                    >
+                      <span>{area}</span>
+                      {book === area ? (
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="5 12 10 17 19 6" />
+                        </svg>
+                      ) : (
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M9 6l6 6-6 6" />
+                        </svg>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
               {hasMessagesHere && (
                 <button
@@ -1181,7 +1363,7 @@ export default function App() {
                             </button>
                           </div>
                           <div className="bookmark-text">
-                            <Markdown>{b.text}</Markdown>
+                            <Markdown className={isWriting(b.book) ? "writing" : ""}>{b.text}</Markdown>
                           </div>
                         </div>
                       ))}
