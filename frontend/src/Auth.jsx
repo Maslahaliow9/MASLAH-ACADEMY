@@ -75,7 +75,7 @@ export default function Auth({ onAuthed, onPendingApproval }) {
     <div className="auth-screen">
       <div className="auth-card">
         <div className="brand">
-          <span className="brand-mark">M</span>
+          <span className="brand-mark"><img src="/logo-mark.png" alt="" /></span>
           <div>
             <h1>Maslah Academy AI</h1>
             <p className="tagline">Your KCSE study partner</p>
