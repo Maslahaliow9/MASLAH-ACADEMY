@@ -4,6 +4,7 @@ import { supabase } from "./lib/supabase.js";
 export default function PendingApproval({ code: initialCode, onApproved, onLogout }) {
   const [checking, setChecking] = useState(false);
   const [code, setCode] = useState(initialCode || null);
+  const [copied, setCopied] = useState(false);
 
   async function checkStatus() {
     setChecking(true);
@@ -27,10 +28,21 @@ export default function PendingApproval({ code: initialCode, onApproved, onLogou
     }
   }
 
+  async function copyCode() {
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
   useEffect(() => {
     checkStatus();
-    // Recheck automatically every 15 seconds so an approved
-    // student doesn't have to remember to tap the button.
+    // Recheck every 15 seconds so an approved student doesn't have
+    // to remember to tap the button.
     const interval = setInterval(checkStatus, 15000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -41,19 +53,25 @@ export default function PendingApproval({ code: initialCode, onApproved, onLogou
       <div className="access-card">
         <div className="access-mark">
           <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeWidth="1.6" />
-            <path d="M12 7.5V12l3 2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+            <circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeWidth="1.7" />
+            <path d="M12 7.5V12l3 2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </div>
-        <h1>Waiting for approval</h1>
+
+        <h1>Almost there</h1>
         <p className="access-sub">
-          Your account has been created. Send this code to the founder to get approved:
+          Your account is created. Send this code to the founders and they'll approve you
+          shortly.
         </p>
 
         <div className="approval-code">{code || "…"}</div>
 
-        <p className="access-sub" style={{ marginTop: "0.9rem" }}>
-          Once approved, this screen will update automatically — no need to log in again.
+        <button type="button" className="pending-logout" onClick={copyCode} disabled={!code}>
+          {copied ? "Copied ✓" : "Copy code"}
+        </button>
+
+        <p className="access-sub" style={{ marginTop: "1rem" }}>
+          This screen updates automatically once you're approved. No need to log in again.
         </p>
 
         <button type="button" className="access-form-btn" onClick={checkStatus} disabled={checking}>
