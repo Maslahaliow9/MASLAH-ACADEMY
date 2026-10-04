@@ -52,10 +52,7 @@ export default function PendingApproval({ code: initialCode, onApproved, onLogou
     <div className="access-screen">
       <div className="access-card">
         <div className="access-mark">
-          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeWidth="1.7" />
-            <path d="M12 7.5V12l3 2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+          <img src="/logo-mark.png" alt="Maslah Academy AI" />
         </div>
 
         <h1>Almost there</h1>
