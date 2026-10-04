@@ -53,7 +53,9 @@ export default function About({ onBack }) {
           </div>
 
           <div className="founder-card cofounder">
-            <span className="founder-mark">F</span>
+            <span className="founder-mark logo">
+              <img src="/logo-mark.png" alt="Maslah Academy AI" />
+            </span>
             <div>
               <p className="founder-name">Feisal Alio</p>
               <div className="founder-roles">
