@@ -17,15 +17,16 @@ export default function About({ onBack }) {
         <div className="about-section">
           <p className="eyebrow">Our vision</p>
           <p className="about-text">
-            A future where every student, wherever they are and whatever their school has,
-            can get instant, accurate and affordable help with every subject they study.
+            A future where every student, wherever they are and whatever resources their
+            school has, can get instant, accurate, and affordable help with every subject
+            they study.
           </p>
         </div>
 
         <div className="about-section">
           <p className="eyebrow">Our mission</p>
           <p className="about-text">
-            To help every KCSE student study with confidence: answers grounded in the
+            To help every KCSE student study with confidence, with answers grounded in the
             real text, explained clearly, and written the way the marking scheme rewards.
           </p>
         </div>
@@ -42,9 +43,9 @@ export default function About({ onBack }) {
                 <span className="founder-role">Developer</span>
               </div>
               <p className="about-text founder-bio">
-                A student of <strong>Takaba Boys' Senior School</strong>, Kenya, who
+                A student at <strong>Takaba Boys' Senior School</strong> in Kenya, Maslah
                 believed that no learner's location should limit how well they can study,
-                and then built the app to prove it.
+                and then built this app to prove it.
               </p>
             </div>
           </div>
@@ -58,16 +59,16 @@ export default function About({ onBack }) {
                 <span className="founder-role">Partner in the vision</span>
               </div>
               <p className="about-text founder-bio">
-                Standing right beside Maslah from the very beginning. His belief,
-                encouragement and ideas are woven into everything this app is growing into.
-                Every great dream needs a friend who says "let's do it together" — and
+                Feisal has stood right beside Maslah from the very beginning. His belief,
+                encouragement, and ideas are woven into everything this app is becoming.
+                Every great dream needs a friend who says "Let's do it together," and
                 Feisal is exactly that. 💚
               </p>
             </div>
           </div>
 
           <p className="about-thanks">
-            Built with heart, for students who deserve the very best. Now go and make
+            Built with heart for students who deserve the very best. Now go and make
             your marks count! 🌟
           </p>
         </div>
